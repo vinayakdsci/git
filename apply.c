@@ -205,8 +205,10 @@ struct fragment {
  * or deflated "literal".
  */
 #define binary_patch_method leading
-#define BINARY_DELTA_DEFLATED	1
-#define BINARY_LITERAL_DEFLATED 2
+enum binary_type_deflated {
+	BINARY_DELTA_DEFLATED = 1,
+	BINARY_LITERAL_DEFLATED
+};
 
 static void free_fragment_list(struct fragment *list)
 {
@@ -918,14 +920,17 @@ static int gitdiff_hdrend(struct gitdiff_data *state UNUSED,
  * their names against any previous information, just
  * to make sure..
  */
-#define DIFF_OLD_NAME 0
-#define DIFF_NEW_NAME 1
+
+enum diff_name {
+	DIFF_OLD_NAME = 0,
+	DIFF_NEW_NAME
+};
 
 static int gitdiff_verify_name(struct gitdiff_data *state,
 			       const char *line,
 			       int isnull,
 			       char **name,
-			       int side)
+			       enum diff_name side)
 {
 	if (!*name && !isnull) {
 		*name = find_name(state->root, line, NULL, state->p_value, TERM_TAB);
@@ -1910,7 +1915,7 @@ static struct fragment *parse_binary_hunk(struct apply_state *state,
 	int llen, used;
 	unsigned long size = *sz_p;
 	char *buffer = *buf_p;
-	int patch_method;
+	enum binary_type_deflated patch_method;
 	unsigned long origlen;
 	char *data = NULL;
 	int hunk_size = 0;

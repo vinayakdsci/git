@@ -47,6 +47,7 @@ void list_aliases(struct string_list *list)
 #define SPLIT_CMDLINE_BAD_ENDING 1
 #define SPLIT_CMDLINE_UNCLOSED_QUOTE 2
 #define SPLIT_CMDLINE_ARGC_OVERFLOW 3
+
 static const char *split_cmdline_errors[] = {
 	N_("cmdline ends with \\"),
 	N_("unclosed quote"),
