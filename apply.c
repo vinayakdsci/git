@@ -206,7 +206,7 @@ struct fragment {
  */
 #define binary_patch_method leading
 enum binary_type_deflated {
-	BINARY_DELTA_DEFLATED = 1,
+	BINARY_DELTA_DEFLATED,
 	BINARY_LITERAL_DEFLATED
 };
 
@@ -922,7 +922,7 @@ static int gitdiff_hdrend(struct gitdiff_data *state UNUSED,
  */
 
 enum diff_name {
-	DIFF_OLD_NAME = 0,
+	DIFF_OLD_NAME,
 	DIFF_NEW_NAME
 };
 
