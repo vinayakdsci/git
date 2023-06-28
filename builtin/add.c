@@ -5,10 +5,13 @@
  */
 #define USE_THE_INDEX_VARIABLE
 #include "cache.h"
+#include "advice.h"
 #include "config.h"
 #include "builtin.h"
 #include "lockfile.h"
+#include "editor.h"
 #include "dir.h"
+#include "gettext.h"
 #include "pathspec.h"
 #include "exec-cmd.h"
 #include "cache-tree.h"
@@ -362,7 +365,7 @@ static int add_config(const char *var, const char *value, void *cb)
 		return 0;
 	}
 
-	return git_default_config(var, value, cb);
+	return git_color_default_config(var, value, cb);
 }
 
 static const char embedded_advice[] = N_(

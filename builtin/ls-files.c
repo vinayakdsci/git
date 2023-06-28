@@ -8,9 +8,12 @@
 #include "cache.h"
 #include "repository.h"
 #include "config.h"
+#include "convert.h"
 #include "quote.h"
 #include "dir.h"
 #include "builtin.h"
+#include "gettext.h"
+#include "object-name.h"
 #include "strbuf.h"
 #include "tree.h"
 #include "cache-tree.h"
@@ -19,8 +22,12 @@
 #include "string-list.h"
 #include "pathspec.h"
 #include "run-command.h"
+#include "setup.h"
 #include "submodule.h"
 #include "submodule-config.h"
+#include "object-store.h"
+#include "hex.h"
+
 
 static int abbrev;
 static int show_deleted;
@@ -89,12 +96,15 @@ static void write_name(const char *name)
 
 static void write_name_to_buf(struct strbuf *sb, const char *name)
 {
-	const char *rel = relative_path(name, prefix_len ? prefix : NULL, sb);
+	struct strbuf buf = STRBUF_INIT;
+	const char *rel = relative_path(name, prefix_len ? prefix : NULL, &buf);
 
 	if (line_terminator)
 		quote_c_style(rel, sb, NULL, 0);
 	else
 		strbuf_addstr(sb, rel);
+
+	strbuf_release(&buf);
 }
 
 static const char *get_tag(const struct cache_entry *ce, const char *tag)
@@ -234,6 +244,24 @@ static void show_submodule(struct repository *superproject,
 	repo_clear(&subrepo);
 }
 
+static void expand_objectsize(struct strbuf *line, const struct object_id *oid,
+			      const enum object_type type, unsigned int padded)
+{
+	if (type == OBJ_BLOB) {
+		unsigned long size;
+		if (oid_object_info(the_repository, oid, &size) < 0)
+			die(_("could not get object info about '%s'"),
+			    oid_to_hex(oid));
+		if (padded)
+			strbuf_addf(line, "%7"PRIuMAX, (uintmax_t)size);
+		else
+			strbuf_addf(line, "%"PRIuMAX, (uintmax_t)size);
+	} else if (padded) {
+		strbuf_addf(line, "%7s", "-");
+	} else {
+		strbuf_addstr(line, "-");
+	}
+}
 struct show_index_data {
 	const char *pathname;
 	struct index_state *istate;
@@ -265,6 +293,12 @@ static size_t expand_show_index(struct strbuf *sb, const char *start,
 		strbuf_addf(sb, "%06o", data->ce->ce_mode);
 	else if (skip_prefix(start, "(objectname)", &p))
 		strbuf_add_unique_abbrev(sb, &data->ce->oid, abbrev);
+	else if (skip_prefix(start, "(objecttype)", &p))
+		strbuf_addstr(sb, type_name(object_type(data->ce->ce_mode)));
+	else if (skip_prefix(start, "(objectsize:padded)", &p))
+		expand_objectsize(sb, &data->ce->oid, object_type(data->ce->ce_mode), 1);
+	else if (skip_prefix(start, "(objectsize)", &p))
+		expand_objectsize(sb, &data->ce->oid, object_type(data->ce->ce_mode), 0);
 	else if (skip_prefix(start, "(stage)", &p))
 		strbuf_addf(sb, "%d", ce_stage(data->ce));
 	else if (skip_prefix(start, "(eolinfo:index)", &p))
@@ -360,7 +394,7 @@ static void show_ru_info(struct index_state *istate)
 			if (!ui->mode[i])
 				continue;
 			printf("%s%06o %s %d\t", tag_resolve_undo, ui->mode[i],
-			       find_unique_abbrev(&ui->oid[i], abbrev),
+			       repo_find_unique_abbrev(the_repository, &ui->oid[i], abbrev),
 			       i + 1);
 			write_name(path);
 		}
@@ -575,7 +609,7 @@ void overlay_tree_on_index(struct index_state *istate,
 	read_tree_fn_t fn = NULL;
 	int err;
 
-	if (get_oid(tree_name, &oid))
+	if (repo_get_oid(the_repository, tree_name, &oid))
 		die("tree-ish %s not found.", tree_name);
 	tree = parse_tree_indirect(&oid);
 	if (!tree)

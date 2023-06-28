@@ -3,11 +3,17 @@
  *
  * Based on git-am.sh by Junio C Hamano.
  */
-#define USE_THE_INDEX_COMPATIBILITY_MACROS
+#define USE_THE_INDEX_VARIABLE
 #include "cache.h"
+#include "abspath.h"
+#include "advice.h"
 #include "config.h"
 #include "builtin.h"
+#include "editor.h"
+#include "environment.h"
 #include "exec-cmd.h"
+#include "gettext.h"
+#include "hex.h"
 #include "parse-options.h"
 #include "dir.h"
 #include "run-command.h"
@@ -22,6 +28,7 @@
 #include "diffcore.h"
 #include "unpack-trees.h"
 #include "branch.h"
+#include "object-name.h"
 #include "sequencer.h"
 #include "revision.h"
 #include "merge-recursive.h"
@@ -33,8 +40,10 @@
 #include "apply.h"
 #include "string-list.h"
 #include "packfile.h"
+#include "pager.h"
 #include "repository.h"
 #include "pretty.h"
+#include "wrapper.h"
 
 /**
  * Returns the length of the first line of msg.
@@ -495,24 +504,12 @@ static int run_applypatch_msg_hook(struct am_state *state)
  */
 static int run_post_rewrite_hook(const struct am_state *state)
 {
-	struct child_process cp = CHILD_PROCESS_INIT;
-	const char *hook = find_hook("post-rewrite");
-	int ret;
+	struct run_hooks_opt opt = RUN_HOOKS_OPT_INIT;
 
-	if (!hook)
-		return 0;
+	strvec_push(&opt.args, "rebase");
+	opt.path_to_stdin = am_path(state, "rewritten");
 
-	strvec_push(&cp.args, hook);
-	strvec_push(&cp.args, "rebase");
-
-	cp.in = xopen(am_path(state, "rewritten"), O_RDONLY);
-	cp.stdout_to_stderr = 1;
-	cp.trace2_hook_name = "post-rewrite";
-
-	ret = run_command(&cp);
-
-	close(cp.in);
-	return ret;
+	return run_hooks_opt("post-rewrite", &opt);
 }
 
 /**
@@ -1078,7 +1075,7 @@ static void am_setup(struct am_state *state, enum patch_format patch_format,
 	else
 		write_state_text(state, "applying", "");
 
-	if (!get_oid("HEAD", &curr_head)) {
+	if (!repo_get_oid(the_repository, "HEAD", &curr_head)) {
 		write_state_text(state, "abort-safety", oid_to_hex(&curr_head));
 		if (!state->rebasing)
 			update_ref("am", "ORIG_HEAD", &curr_head, NULL, 0,
@@ -1121,7 +1118,7 @@ static void am_next(struct am_state *state)
 	unlink(am_path(state, "original-commit"));
 	delete_ref(NULL, "REBASE_HEAD", NULL, REF_NO_DEREF);
 
-	if (!get_oid("HEAD", &head))
+	if (!repo_get_oid(the_repository, "HEAD", &head))
 		write_state_text(state, "abort-safety", oid_to_hex(&head));
 	else
 		write_state_text(state, "abort-safety", "");
@@ -1341,7 +1338,8 @@ static void get_commit_info(struct am_state *state, struct commit *commit)
 	size_t ident_len;
 	struct ident_split id;
 
-	buffer = logmsg_reencode(commit, NULL, get_commit_output_encoding());
+	buffer = repo_logmsg_reencode(the_repository, commit, NULL,
+				      get_commit_output_encoding());
 
 	ident_line = find_commit_header(buffer, "author", &ident_len);
 	if (!ident_line)
@@ -1373,7 +1371,7 @@ static void get_commit_info(struct am_state *state, struct commit *commit)
 		die(_("unable to parse commit %s"), oid_to_hex(&commit->object.oid));
 	state->msg = xstrdup(msg + 2);
 	state->msg_len = strlen(state->msg);
-	unuse_commit_buffer(commit, buffer);
+	repo_unuse_commit_buffer(the_repository, commit, buffer);
 }
 
 /**
@@ -1414,9 +1412,9 @@ static void write_index_patch(const struct am_state *state)
 	struct rev_info rev_info;
 	FILE *fp;
 
-	if (!get_oid("HEAD", &head)) {
+	if (!repo_get_oid(the_repository, "HEAD", &head)) {
 		struct commit *commit = lookup_commit_or_die(&head, "HEAD");
-		tree = get_commit_tree(commit);
+		tree = repo_get_commit_tree(the_repository, commit);
 	} else
 		tree = lookup_tree(the_repository,
 				   the_repository->hash_algo->empty_tree);
@@ -1568,7 +1566,7 @@ static int fall_back_threeway(const struct am_state *state, const char *index_pa
 	struct commit *result;
 	char *their_tree_name;
 
-	if (get_oid("HEAD", &our_tree) < 0)
+	if (repo_get_oid(the_repository, "HEAD", &our_tree) < 0)
 		oidcpy(&our_tree, the_hash_algo->empty_tree);
 
 	if (build_fake_ancestor(state, index_path))
@@ -1655,10 +1653,10 @@ static void do_commit(const struct am_state *state)
 	if (!state->no_verify && run_hooks("pre-applypatch"))
 		exit(1);
 
-	if (write_cache_as_tree(&tree, 0, NULL))
+	if (write_index_as_tree(&tree, &the_index, get_index_file(), 0, NULL))
 		die(_("git write-tree failed to write a tree"));
 
-	if (!get_oid_commit("HEAD", &parent)) {
+	if (!repo_get_oid_commit(the_repository, "HEAD", &parent)) {
 		old_oid = &parent;
 		commit_list_insert(lookup_commit(the_repository, &parent),
 				   &parents);
@@ -2063,7 +2061,7 @@ static int clean_index(const struct object_id *head, const struct object_id *rem
 	if (fast_forward_to(head_tree, head_tree, 1))
 		return -1;
 
-	if (write_cache_as_tree(&index, 0, NULL))
+	if (write_index_as_tree(&index, &the_index, get_index_file(), 0, NULL))
 		return -1;
 
 	index_tree = parse_tree_indirect(&index);
@@ -2100,7 +2098,7 @@ static void am_skip(struct am_state *state)
 
 	am_rerere_clear();
 
-	if (get_oid("HEAD", &head))
+	if (repo_get_oid(the_repository, "HEAD", &head))
 		oidcpy(&head, the_hash_algo->empty_tree);
 
 	if (clean_index(&head, &head))
@@ -2142,7 +2140,7 @@ static int safe_to_abort(const struct am_state *state)
 		oidclr(&abort_safety);
 	strbuf_release(&sb);
 
-	if (get_oid("HEAD", &head))
+	if (repo_get_oid(the_repository, "HEAD", &head))
 		oidclr(&head);
 
 	if (oideq(&head, &abort_safety))
@@ -2175,7 +2173,7 @@ static void am_abort(struct am_state *state)
 	if (!has_curr_head)
 		oidcpy(&curr_head, the_hash_algo->empty_tree);
 
-	has_orig_head = !get_oid("ORIG_HEAD", &orig_head);
+	has_orig_head = !repo_get_oid(the_repository, "ORIG_HEAD", &orig_head);
 	if (!has_orig_head)
 		oidcpy(&orig_head, the_hash_algo->empty_tree);
 
@@ -2312,17 +2310,6 @@ static int parse_opt_show_current_patch(const struct option *opt, const char *ar
 	return 0;
 }
 
-static int git_am_config(const char *k, const char *v, void *cb UNUSED)
-{
-	int status;
-
-	status = git_gpg_config(k, v, NULL);
-	if (status)
-		return status;
-
-	return git_default_config(k, v, NULL);
-}
-
 int cmd_am(int argc, const char **argv, const char *prefix)
 {
 	struct am_state state;
@@ -2446,7 +2433,7 @@ int cmd_am(int argc, const char **argv, const char *prefix)
 	if (argc == 2 && !strcmp(argv[1], "-h"))
 		usage_with_options(usage, options);
 
-	git_config(git_am_config, NULL);
+	git_config(git_default_config, NULL);
 
 	am_state_init(&state);
 
