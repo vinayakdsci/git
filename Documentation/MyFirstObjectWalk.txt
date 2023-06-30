@@ -805,6 +805,10 @@ just walks of commits. First, we'll make our handlers chattier - modify
 go:
 
 ----
+#include "hex.h"
+
+...
+
 static void walken_show_commit(struct commit *cmt, void *buf)
 {
 	trace_printf("commit: %s\n", oid_to_hex(&cmt->object.oid));
