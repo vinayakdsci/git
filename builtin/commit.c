@@ -763,7 +763,7 @@ static int prepare_to_commit(const char *index_file, const char *prefix,
 			struct commit *c;
 			c = lookup_commit_reference_by_name(squash_message);
 			if (!c)
-				die(_("could not lookup commit %s"), squash_message);
+				die(_("could not lookup commit '%s'"), squash_message);
 			ctx.output_encoding = get_commit_output_encoding();
 			repo_format_commit_message(the_repository, c,
 						   "squash! %s\n\n", &sb,
@@ -798,7 +798,7 @@ static int prepare_to_commit(const char *index_file, const char *prefix,
 		char *fmt;
 		commit = lookup_commit_reference_by_name(fixup_commit);
 		if (!commit)
-			die(_("could not lookup commit %s"), fixup_commit);
+			die(_("could not lookup commit '%s'"), fixup_commit);
 		ctx.output_encoding = get_commit_output_encoding();
 		fmt = xstrfmt("%s! %%s\n\n", fixup_prefix);
 		repo_format_commit_message(the_repository, commit, fmt, &sb,
@@ -1043,7 +1043,8 @@ static int prepare_to_commit(const char *index_file, const char *prefix,
 		struct child_process run_trailer = CHILD_PROCESS_INIT;
 
 		strvec_pushl(&run_trailer.args, "interpret-trailers",
-			     "--in-place", git_path_commit_editmsg(), NULL);
+			     "--in-place", "--no-divider",
+			     git_path_commit_editmsg(), NULL);
 		strvec_pushv(&run_trailer.args, trailer_args.v);
 		run_trailer.git_cmd = 1;
 		if (run_command(&run_trailer))
@@ -1189,7 +1190,7 @@ static const char *read_commit_message(const char *name)
 
 	commit = lookup_commit_reference_by_name(name);
 	if (!commit)
-		die(_("could not lookup commit %s"), name);
+		die(_("could not lookup commit '%s'"), name);
 	out_enc = get_commit_output_encoding();
 	return repo_logmsg_reencode(the_repository, commit, NULL, out_enc);
 }
