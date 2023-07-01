@@ -9,6 +9,7 @@
 #include "revision.h"
 #include "commit.h"
 #include "config.h"
+#include "oidset.h"
 #include "hex.h"
 #include "parse-options.h"
 #include "pretty.h"
