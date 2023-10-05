@@ -809,6 +809,11 @@ my_match_and_clean () {
 		status --porcelain=v2 >actual.without &&
 	test_cmp actual.with actual.without &&
 
+	git -C super --no-optional-locks diff-index --name-status HEAD >actual.with &&
+	git -C super --no-optional-locks -c core.fsmonitor=false \
+		diff-index --name-status HEAD >actual.without &&
+	test_cmp actual.with actual.without &&
+
 	git -C super/dir_1/dir_2/sub reset --hard &&
 	git -C super/dir_1/dir_2/sub clean -d -f
 }
@@ -993,6 +998,43 @@ test_expect_success !UNICODE_COMPOSITION_SENSITIVE 'Unicode nfc/nfd' '
 	# We should have synthesized an NFC event.
 	grep -E "^event: nfd/d_${utf8_nfd}/?$" ./unicode.trace &&
 	grep -E "^event: nfd/d_${utf8_nfc}/?$" ./unicode.trace
+'
+
+test_expect_success 'split-index and FSMonitor work well together' '
+	git init split-index &&
+	test_when_finished "git -C \"$PWD/split-index\" \
+		fsmonitor--daemon stop" &&
+	(
+		cd split-index &&
+		git config core.splitIndex true &&
+		# force split-index in most cases
+		git config splitIndex.maxPercentChange 99 &&
+		git config core.fsmonitor true &&
+
+		# Create the following commit topology:
+		#
+		# *   merge three
+		# |\
+		# | * three
+		# * | merge two
+		# |\|
+		# | * two
+		# * | one
+		# |/
+		# * 5a5efd7 initial
+
+		test_commit initial &&
+		test_commit two &&
+		test_commit three &&
+		git reset --hard initial &&
+		test_commit one &&
+		test_tick &&
+		git merge two &&
+		test_tick &&
+		git merge three &&
+
+		git rebase --force-rebase -r one
+	)
 '
 
 test_done

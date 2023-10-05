@@ -1,5 +1,9 @@
-#include "cache.h"
-#include "object-store.h"
+#include "git-compat-util.h"
+#include "date.h"
+#include "dir.h"
+#include "hex.h"
+#include "object-store-ll.h"
+#include "path.h"
 #include "repository.h"
 #include "object.h"
 #include "attr.h"
@@ -19,6 +23,8 @@
 #include "config.h"
 #include "credential.h"
 #include "help.h"
+
+static ssize_t max_tree_entry_len = 4096;
 
 #define STR(x) #x
 #define MSG_ID(id, msg_type) { STR(id), NULL, NULL, FSCK_##msg_type },
@@ -150,15 +156,29 @@ void fsck_set_msg_type(struct fsck_options *options,
 		       const char *msg_id_str, const char *msg_type_str)
 {
 	int msg_id = parse_msg_id(msg_id_str);
-	enum fsck_msg_type msg_type = parse_msg_type(msg_type_str);
+	char *to_free = NULL;
+	enum fsck_msg_type msg_type;
 
 	if (msg_id < 0)
 		die("Unhandled message id: %s", msg_id_str);
+
+	if (msg_id == FSCK_MSG_LARGE_PATHNAME) {
+		const char *colon = strchr(msg_type_str, ':');
+		if (colon) {
+			msg_type_str = to_free =
+				xmemdupz(msg_type_str, colon - msg_type_str);
+			colon++;
+			if (!git_parse_ssize_t(colon, &max_tree_entry_len))
+				die("unable to parse max tree entry len: %s", colon);
+		}
+	}
+	msg_type = parse_msg_type(msg_type_str);
 
 	if (msg_type != FSCK_ERROR && msg_id_info[msg_id].msg_type == FSCK_FATAL)
 		die("Cannot demote %s to %s", msg_id_str, msg_type_str);
 
 	fsck_set_msg_type_from_ids(options, msg_id, msg_type);
+	free(to_free);
 }
 
 void fsck_set_msg_types(struct fsck_options *options, const char *values)
@@ -353,7 +373,7 @@ static int fsck_walk_commit(struct commit *commit, void *data, struct fsck_optio
 	int result;
 	const char *name;
 
-	if (parse_commit(commit))
+	if (repo_parse_commit(the_repository, commit))
 		return -1;
 
 	name = fsck_get_object_name(options, &commit->object.oid);
@@ -361,7 +381,7 @@ static int fsck_walk_commit(struct commit *commit, void *data, struct fsck_optio
 		fsck_put_object_name(options, get_commit_tree_oid(commit),
 				     "%s:", name);
 
-	result = options->walk((struct object *)get_commit_tree(commit),
+	result = options->walk((struct object *) repo_get_commit_tree(the_repository, commit),
 			       OBJ_TREE, data, options);
 	if (result < 0)
 		return result;
@@ -574,6 +594,7 @@ static int fsck_tree(const struct object_id *tree_oid,
 	int has_bad_modes = 0;
 	int has_dup_entries = 0;
 	int not_properly_sorted = 0;
+	int has_large_name = 0;
 	struct tree_desc desc;
 	unsigned o_mode;
 	const char *o_name;
@@ -603,6 +624,7 @@ static int fsck_tree(const struct object_id *tree_oid,
 		has_dotdot |= !strcmp(name, "..");
 		has_dotgit |= is_hfs_dotgit(name) || is_ntfs_dotgit(name);
 		has_zero_pad |= *(char *)desc.buffer == '0';
+		has_large_name |= tree_entry_len(&desc.entry) > max_tree_entry_len;
 
 		if (is_hfs_dotgitmodules(name) || is_ntfs_dotgitmodules(name)) {
 			if (!S_ISLNK(mode))
@@ -745,6 +767,10 @@ static int fsck_tree(const struct object_id *tree_oid,
 		retval += report(options, tree_oid, OBJ_TREE,
 				 FSCK_MSG_TREE_NOT_SORTED,
 				 "not properly sorted");
+	if (has_large_name)
+		retval += report(options, tree_oid, OBJ_TREE,
+				 FSCK_MSG_LARGE_PATHNAME,
+				 "contains excessively large pathname");
 	return retval;
 }
 
@@ -1160,7 +1186,9 @@ struct fsck_gitmodules_data {
 	int ret;
 };
 
-static int fsck_gitmodules_fn(const char *var, const char *value, void *vdata)
+static int fsck_gitmodules_fn(const char *var, const char *value,
+			      const struct config_context *ctx UNUSED,
+			      void *vdata)
 {
 	struct fsck_gitmodules_data *data = vdata;
 	const char *subsection, *key;
@@ -1233,7 +1261,8 @@ static int fsck_blob(const struct object_id *oid, const char *buf,
 		data.ret = 0;
 		config_opts.error_action = CONFIG_ERROR_SILENT;
 		if (git_config_from_mem(fsck_gitmodules_fn, CONFIG_ORIGIN_BLOB,
-					".gitmodules", buf, size, &data, &config_opts))
+					".gitmodules", buf, size, &data,
+					CONFIG_SCOPE_UNKNOWN, &config_opts))
 			data.ret |= report(options, oid, OBJ_BLOB,
 					FSCK_MSG_GITMODULES_PARSE,
 					"could not parse gitmodules blob");
@@ -1302,9 +1331,9 @@ int fsck_buffer(const struct object_id *oid, enum object_type type,
 
 int fsck_error_function(struct fsck_options *o,
 			const struct object_id *oid,
-			enum object_type object_type,
+			enum object_type object_type UNUSED,
 			enum fsck_msg_type msg_type,
-			enum fsck_msg_id msg_id,
+			enum fsck_msg_id msg_id UNUSED,
 			const char *message)
 {
 	if (msg_type == FSCK_WARN) {
@@ -1332,7 +1361,7 @@ static int fsck_blobs(struct oidset *blobs_found, struct oidset *blobs_done,
 		if (oidset_contains(blobs_done, oid))
 			continue;
 
-		buf = read_object_file(oid, &type, &size);
+		buf = repo_read_object_file(the_repository, oid, &type, &size);
 		if (!buf) {
 			if (is_promisor_object(oid))
 				continue;
@@ -1370,7 +1399,8 @@ int fsck_finish(struct fsck_options *options)
 	return ret;
 }
 
-int git_fsck_config(const char *var, const char *value, void *cb)
+int git_fsck_config(const char *var, const char *value,
+		    const struct config_context *ctx, void *cb)
 {
 	struct fsck_options *options = cb;
 	if (strcmp(var, "fsck.skiplist") == 0) {
@@ -1391,7 +1421,7 @@ int git_fsck_config(const char *var, const char *value, void *cb)
 		return 0;
 	}
 
-	return git_default_config(var, value, cb);
+	return git_default_config(var, value, ctx, cb);
 }
 
 /*

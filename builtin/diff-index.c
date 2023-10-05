@@ -1,10 +1,13 @@
-#include "cache.h"
+#include "builtin.h"
 #include "config.h"
 #include "diff.h"
 #include "diff-merges.h"
 #include "commit.h"
+#include "preload-index.h"
+#include "repository.h"
 #include "revision.h"
-#include "builtin.h"
+#include "setup.h"
+#include "sparse-index.h"
 #include "submodule.h"
 
 static const char diff_cache_usage[] =
@@ -69,8 +72,8 @@ int cmd_diff_index(int argc, const char **argv, const char *prefix)
 		perror("repo_read_index");
 		return -1;
 	}
-	result = run_diff_index(&rev, option);
-	result = diff_result_code(&rev.diffopt, result);
+	run_diff_index(&rev, option);
+	result = diff_result_code(&rev.diffopt);
 	release_revisions(&rev);
 	return result;
 }

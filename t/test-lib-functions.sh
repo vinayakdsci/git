@@ -32,6 +32,14 @@ test_set_editor () {
 	export EDITOR
 }
 
+# Like test_set_editor but sets GIT_SEQUENCE_EDITOR instead of EDITOR
+test_set_sequence_editor () {
+	FAKE_SEQUENCE_EDITOR="$1"
+	export FAKE_SEQUENCE_EDITOR
+	GIT_SEQUENCE_EDITOR='"$FAKE_SEQUENCE_EDITOR"'
+	export GIT_SEQUENCE_EDITOR
+}
+
 test_decode_color () {
 	awk '
 		function name(n) {
@@ -534,8 +542,17 @@ test_config () {
 		config_dir=$1
 		shift
 	fi
-	test_when_finished "test_unconfig ${config_dir:+-C '$config_dir'} '$1'" &&
-	git ${config_dir:+-C "$config_dir"} config "$@"
+
+	# If --worktree is provided, use it to configure/unconfigure
+	is_worktree=
+	if test "$1" = --worktree
+	then
+		is_worktree=1
+		shift
+	fi
+
+	test_when_finished "test_unconfig ${config_dir:+-C '$config_dir'} ${is_worktree:+--worktree} '$1'" &&
+	git ${config_dir:+-C "$config_dir"} config ${is_worktree:+--worktree} "$@"
 }
 
 test_config_global () {
@@ -893,6 +910,15 @@ test_path_is_symlink () {
 	fi
 }
 
+test_path_is_executable () {
+	test "$#" -ne 1 && BUG "1 param"
+	if ! test -x "$1"
+	then
+		echo "$1 is not executable"
+		false
+	fi
+}
+
 # Check if the directory exists and is empty as expected, barf otherwise.
 test_dir_is_empty () {
 	test "$#" -ne 1 && BUG "1 param"
@@ -1219,15 +1245,6 @@ test_i18ngrep () {
 	return 1
 }
 
-# Call any command "$@" but be more verbose about its
-# failure. This is handy for commands like "test" which do
-# not output anything when they fail.
-verbose () {
-	"$@" && return 0
-	echo >&4 "command failed: $(git rev-parse --sq-quote "$@")"
-	return 1
-}
-
 # Check if the file expected to be empty is indeed empty, and barfs
 # otherwise.
 
@@ -1272,6 +1289,39 @@ test_cmp_rev () {
 			return 1
 		fi
 	fi
+}
+
+# Tests that a commit message matches the expected text
+#
+# Usage: test_commit_message <rev> [-m <msg> | <file>]
+#
+# When using "-m" <msg> will have a line feed appended. If the second
+# argument is omitted then the expected message is read from stdin.
+
+test_commit_message () {
+	local msg_file=expect.msg
+
+	case $# in
+	3)
+		if test "$2" = "-m"
+		then
+			printf "%s\n" "$3" >"$msg_file"
+		else
+			BUG "Usage: test_commit_message <rev> [-m <message> | <file>]"
+		fi
+		;;
+	2)
+		msg_file="$2"
+		;;
+	1)
+		cat >"$msg_file"
+		;;
+	*)
+		BUG "Usage: test_commit_message <rev> [-m <message> | <file>]"
+		;;
+	esac
+	git show --no-patch --pretty=format:%B "$1" -- >actual.msg &&
+	test_cmp "$msg_file" actual.msg
 }
 
 # Compare paths respecting core.ignoreCase

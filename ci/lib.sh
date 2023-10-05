@@ -278,11 +278,10 @@ linux-leaks)
 	export GIT_TEST_PASSING_SANITIZE_LEAK=true
 	export GIT_TEST_SANITIZE_LEAK_LOG=true
 	;;
-linux-asan)
-	export SANITIZE=address
-	;;
-linux-ubsan)
-	export SANITIZE=undefined
+linux-asan-ubsan)
+	export SANITIZE=address,undefined
+	export NO_SVN_TESTS=LetsSaveSomeTime
+	MAKEFLAGS="$MAKEFLAGS NO_PYTHON=YepBecauseP4FlakesTooOften"
 	;;
 esac
 

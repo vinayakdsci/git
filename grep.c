@@ -1,7 +1,10 @@
-#include "cache.h"
+#include "git-compat-util.h"
 #include "config.h"
+#include "gettext.h"
 #include "grep.h"
-#include "object-store.h"
+#include "hex.h"
+#include "object-store-ll.h"
+#include "pretty.h"
 #include "userdiff.h"
 #include "xdiff-interface.h"
 #include "diff.h"
@@ -14,7 +17,7 @@ static int grep_source_load(struct grep_source *gs);
 static int grep_source_is_binary(struct grep_source *gs,
 				 struct index_state *istate);
 
-static void std_output(struct grep_opt *opt, const void *buf, size_t size)
+static void std_output(struct grep_opt *opt UNUSED, const void *buf, size_t size)
 {
 	fwrite(buf, size, 1, stdout);
 }
@@ -52,7 +55,8 @@ define_list_config_array_extra(color_grep_slots, {"match"});
  * Read the configuration file once and store it in
  * the grep_defaults template.
  */
-int grep_config(const char *var, const char *value, void *cb)
+int grep_config(const char *var, const char *value,
+		const struct config_context *ctx, void *cb)
 {
 	struct grep_opt *opt = cb;
 	const char *slot;
@@ -87,9 +91,9 @@ int grep_config(const char *var, const char *value, void *cb)
 	if (!strcmp(var, "color.grep"))
 		opt->color = git_config_colorbool(var, value);
 	if (!strcmp(var, "color.grep.match")) {
-		if (grep_config("color.grep.matchcontext", value, cb) < 0)
+		if (grep_config("color.grep.matchcontext", value, ctx, cb) < 0)
 			return -1;
-		if (grep_config("color.grep.matchselected", value, cb) < 0)
+		if (grep_config("color.grep.matchselected", value, ctx, cb) < 0)
 			return -1;
 	} else if (skip_prefix(var, "color.grep.", &slot)) {
 		int i = LOOKUP_CONFIG(color_grep_slots, slot);
@@ -320,6 +324,15 @@ static void compile_pcre2_pattern(struct grep_pat *p, const struct grep_opt *opt
 	if (!opt->ignore_locale && is_utf8_locale() && !literal)
 		options |= (PCRE2_UTF | PCRE2_UCP | PCRE2_MATCH_INVALID_UTF);
 
+#ifndef GIT_PCRE2_VERSION_10_35_OR_HIGHER
+	/*
+	 * Work around a JIT bug related to invalid Unicode character handling
+	 * fixed in 10.35:
+	 * https://github.com/PCRE2Project/pcre2/commit/c21bd977547d
+	 */
+	options &= ~PCRE2_UCP;
+#endif
+
 #ifndef GIT_PCRE2_VERSION_10_36_OR_HIGHER
 	/* Work around https://bugs.exim.org/show_bug.cgi?id=2642 fixed in 10.36 */
 	if (PCRE2_MATCH_INVALID_UTF && options & (PCRE2_UTF | PCRE2_CASELESS))
@@ -439,18 +452,20 @@ static void free_pcre2_pattern(struct grep_pat *p)
 	pcre2_general_context_free(p->pcre2_general_context);
 }
 #else /* !USE_LIBPCRE2 */
-static void compile_pcre2_pattern(struct grep_pat *p, const struct grep_opt *opt)
+static void compile_pcre2_pattern(struct grep_pat *p UNUSED,
+				  const struct grep_opt *opt UNUSED)
 {
 	die("cannot use Perl-compatible regexes when not compiled with USE_LIBPCRE");
 }
 
-static int pcre2match(struct grep_pat *p, const char *line, const char *eol,
-		regmatch_t *match, int eflags)
+static int pcre2match(struct grep_pat *p UNUSED, const char *line UNUSED,
+		      const char *eol UNUSED, regmatch_t *match UNUSED,
+		      int eflags UNUSED)
 {
 	return 1;
 }
 
-static void free_pcre2_pattern(struct grep_pat *p)
+static void free_pcre2_pattern(struct grep_pat *p UNUSED)
 {
 }
 
@@ -815,11 +830,11 @@ static void free_pattern_expr(struct grep_expr *x)
 	free(x);
 }
 
-void free_grep_patterns(struct grep_opt *opt)
+static void free_grep_pat(struct grep_pat *pattern)
 {
 	struct grep_pat *p, *n;
 
-	for (p = opt->pattern_list; p; p = n) {
+	for (p = pattern; p; p = n) {
 		n = p->next;
 		switch (p->token) {
 		case GREP_PATTERN: /* atom */
@@ -836,10 +851,15 @@ void free_grep_patterns(struct grep_opt *opt)
 		}
 		free(p);
 	}
+}
 
-	if (!opt->pattern_expression)
-		return;
-	free_pattern_expr(opt->pattern_expression);
+void free_grep_patterns(struct grep_opt *opt)
+{
+	free_grep_pat(opt->pattern_list);
+	free_grep_pat(opt->header_list);
+
+	if (opt->pattern_expression)
+		free_pattern_expr(opt->pattern_expression);
 }
 
 static const char *end_of_line(const char *cp, unsigned long *left)

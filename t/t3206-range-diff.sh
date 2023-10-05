@@ -33,6 +33,26 @@ test_expect_success 'setup' '
 	u3 sha256:736c4bc
 	u4 sha256:673e77d
 
+	# topic (abbrev=10)
+	t1_abbrev sha1:4de457d2c0
+	t2_abbrev sha1:fccce22f8c
+	t3_abbrev sha1:147e64ef53
+	t4_abbrev sha1:a63e992599
+	t1_abbrev sha256:b89f8b9092
+	t2_abbrev sha256:5f12aadf34
+	t3_abbrev sha256:ea8b273a6c
+	t4_abbrev sha256:14b73361fc
+
+	# unmodified (abbrev=10)
+	u1_abbrev sha1:35b9b25f76
+	u2_abbrev sha1:de345ab3de
+	u3_abbrev sha1:9af6654000
+	u4_abbrev sha1:2901f773f3
+	u1_abbrev sha256:e3731be242
+	u2_abbrev sha256:14fadf8cee
+	u3_abbrev sha256:736c4bcb44
+	u4_abbrev sha256:673e77d589
+
 	# reordered
 	r1 sha1:aca177a
 	r2 sha1:14ad629
@@ -150,6 +170,18 @@ test_expect_success 'simple B...C (unmodified)' '
 test_expect_success 'simple A B C (unmodified)' '
 	git range-diff --no-color main topic unmodified >actual &&
 	# same "expect" as above
+	test_cmp expect actual
+'
+
+test_expect_success 'simple A..B A..C (unmodified) with --abbrev' '
+	git range-diff --no-color --abbrev=10 main..topic main..unmodified \
+		>actual &&
+	cat >expect <<-EOF &&
+	1:  $(test_oid t1_abbrev) = 1:  $(test_oid u1_abbrev) s/5/A/
+	2:  $(test_oid t2_abbrev) = 2:  $(test_oid u2_abbrev) s/4/A/
+	3:  $(test_oid t3_abbrev) = 3:  $(test_oid u3_abbrev) s/11/B/
+	4:  $(test_oid t4_abbrev) = 4:  $(test_oid u4_abbrev) s/12/B/
+	EOF
 	test_cmp expect actual
 '
 
@@ -630,6 +662,20 @@ test_expect_success 'range-diff with multiple --notes' '
 	test_cmp expect actual
 '
 
+# `range-diff` should act like `log` with regards to notes
+test_expect_success 'range-diff with --notes=custom does not show default notes' '
+	git notes add -m "topic note" topic &&
+	git notes add -m "unmodified note" unmodified &&
+	git notes --ref=custom add -m "topic note" topic &&
+	git notes --ref=custom add -m "unmodified note" unmodified &&
+	test_when_finished git notes remove topic unmodified &&
+	test_when_finished git notes --ref=custom remove topic unmodified &&
+	git range-diff --notes=custom main..topic main..unmodified \
+		>actual &&
+	! grep "## Notes ##" actual &&
+	grep "## Notes (custom) ##" actual
+'
+
 test_expect_success 'format-patch --range-diff does not compare notes by default' '
 	git notes add -m "topic note" topic &&
 	git notes add -m "unmodified note" unmodified &&
@@ -645,6 +691,20 @@ test_expect_success 'format-patch --range-diff does not compare notes by default
 	grep "= 4: .* s/12/B" 0000-* &&
 	! grep "Notes" 0000-* &&
 	! grep "note" 0000-*
+'
+
+test_expect_success 'format-patch --notes=custom --range-diff only compares custom notes' '
+	git notes add -m "topic note" topic &&
+	git notes --ref=custom add -m "topic note (custom)" topic &&
+	git notes add -m "unmodified note" unmodified &&
+	git notes --ref=custom add -m "unmodified note (custom)" unmodified &&
+	test_when_finished git notes remove topic unmodified &&
+	test_when_finished git notes --ref=custom remove topic unmodified &&
+	git format-patch --notes=custom --cover-letter --range-diff=$prev \
+		main..unmodified >actual &&
+	test_when_finished "rm 000?-*" &&
+	grep "## Notes (custom) ##" 0000-* &&
+	! grep "## Notes ##" 0000-*
 '
 
 test_expect_success 'format-patch --range-diff with --no-notes' '

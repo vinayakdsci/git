@@ -14,7 +14,7 @@
  * "cale", "peedy", or "ins" instead of "ort"?)
  */
 
-#include "cache.h"
+#include "git-compat-util.h"
 #include "merge-ort.h"
 
 #include "alloc.h"
@@ -26,14 +26,25 @@
 #include "diff.h"
 #include "diffcore.h"
 #include "dir.h"
+#include "environment.h"
+#include "gettext.h"
+#include "hex.h"
 #include "entry.h"
-#include "ll-merge.h"
-#include "object-store.h"
+#include "merge-ll.h"
+#include "match-trees.h"
+#include "mem-pool.h"
+#include "object-name.h"
+#include "object-store-ll.h"
+#include "oid-array.h"
+#include "path.h"
 #include "promisor-remote.h"
+#include "read-cache-ll.h"
 #include "revision.h"
+#include "sparse-index.h"
 #include "strmap.h"
 #include "submodule-config.h"
 #include "submodule.h"
+#include "trace2.h"
 #include "tree.h"
 #include "unpack-trees.h"
 #include "xdiff-interface.h"
@@ -708,23 +719,6 @@ static void clear_or_reinit_internal_opts(struct merge_options_internal *opti,
 	/* Clean out callback_data as well. */
 	FREE_AND_NULL(renames->callback_data);
 	renames->callback_data_nr = renames->callback_data_alloc = 0;
-}
-
-__attribute__((format (printf, 2, 3)))
-static int err(struct merge_options *opt, const char *err, ...)
-{
-	va_list params;
-	struct strbuf sb = STRBUF_INIT;
-
-	strbuf_addstr(&sb, "error: ");
-	va_start(params, err);
-	strbuf_vaddf(&sb, err, params);
-	va_end(params);
-
-	error("%s", sb.buf);
-	strbuf_release(&sb);
-
-	return -1;
 }
 
 static void format_commit(struct strbuf *sb,
@@ -2111,13 +2105,12 @@ static int handle_content_merge(struct merge_options *opt,
 					  &result_buf);
 
 		if ((merge_status < 0) || !result_buf.ptr)
-			ret = err(opt, _("Failed to execute internal merge"));
+			ret = error(_("failed to execute internal merge"));
 
 		if (!ret &&
 		    write_object_file(result_buf.ptr, result_buf.size,
 				      OBJ_BLOB, &result->oid))
-			ret = err(opt, _("Unable to add %s to database"),
-				  path);
+			ret = error(_("unable to add %s to database"), path);
 
 		free(result_buf.ptr);
 		if (ret)
@@ -3331,10 +3324,7 @@ static int collect_renames(struct merge_options *opt,
 	return clean;
 }
 
-static int detect_and_process_renames(struct merge_options *opt,
-				      struct tree *merge_base,
-				      struct tree *side1,
-				      struct tree *side2)
+static int detect_and_process_renames(struct merge_options *opt)
 {
 	struct diff_queue_struct combined = { 0 };
 	struct rename_info *renames = &opt->priv->renames;
@@ -3498,19 +3488,18 @@ static int sort_dirs_next_to_their_children(const char *one, const char *two)
 		return c1 - c2;
 }
 
-static int read_oid_strbuf(struct merge_options *opt,
-			   const struct object_id *oid,
+static int read_oid_strbuf(const struct object_id *oid,
 			   struct strbuf *dst)
 {
 	void *buf;
 	enum object_type type;
 	unsigned long size;
-	buf = read_object_file(oid, &type, &size);
+	buf = repo_read_object_file(the_repository, oid, &type, &size);
 	if (!buf)
-		return err(opt, _("cannot read object %s"), oid_to_hex(oid));
+		return error(_("cannot read object %s"), oid_to_hex(oid));
 	if (type != OBJ_BLOB) {
 		free(buf);
-		return err(opt, _("object %s is not a blob"), oid_to_hex(oid));
+		return error(_("object %s is not a blob"), oid_to_hex(oid));
 	}
 	strbuf_attach(dst, buf, size, size + 1);
 	return 0;
@@ -3534,8 +3523,8 @@ static int blob_unchanged(struct merge_options *opt,
 	if (oideq(&base->oid, &side->oid))
 		return 1;
 
-	if (read_oid_strbuf(opt, &base->oid, &basebuf) ||
-	    read_oid_strbuf(opt, &side->oid, &sidebuf))
+	if (read_oid_strbuf(&base->oid, &basebuf) ||
+	    read_oid_strbuf(&side->oid, &sidebuf))
 		goto error_return;
 	/*
 	 * Note: binary | is used so that both renormalizations are
@@ -4216,7 +4205,7 @@ static void prefetch_for_content_merges(struct merge_options *opt,
 	struct string_list_item *e;
 	struct oid_array to_fetch = OID_ARRAY_INIT;
 
-	if (opt->repo != the_repository || !has_promisor_remote())
+	if (opt->repo != the_repository || !repo_has_promisor_remote(the_repository))
 		return;
 
 	for (e = &plist->items[plist->nr-1]; e >= plist->items; --e) {
@@ -4715,14 +4704,14 @@ void merge_switch_to_result(struct merge_options *opt,
 void merge_finalize(struct merge_options *opt,
 		    struct merge_result *result)
 {
-	struct merge_options_internal *opti = result->priv;
-
 	if (opt->renormalize)
 		git_attr_set_direction(GIT_ATTR_CHECKIN);
 	assert(opt->priv == NULL);
 
-	clear_or_reinit_internal_opts(opti, 0);
-	FREE_AND_NULL(opti);
+	if (result->priv) {
+		clear_or_reinit_internal_opts(result->priv, 0);
+		FREE_AND_NULL(result->priv);
+	}
 }
 
 /*** Function Grouping: helper functions for merge_incore_*() ***/
@@ -4891,8 +4880,7 @@ static void merge_start(struct merge_options *opt, struct merge_result *result)
 	trace2_region_leave("merge", "allocate/init", opt->repo);
 }
 
-static void merge_check_renames_reusable(struct merge_options *opt,
-					 struct merge_result *result,
+static void merge_check_renames_reusable(struct merge_result *result,
 					 struct tree *merge_base,
 					 struct tree *side1,
 					 struct tree *side2)
@@ -4962,7 +4950,7 @@ redo:
 		 * TRANSLATORS: The %s arguments are: 1) tree hash of a merge
 		 * base, and 2-3) the trees for the two trees we're merging.
 		 */
-		err(opt, _("collecting merge info failed for trees %s, %s, %s"),
+		error(_("collecting merge info failed for trees %s, %s, %s"),
 		    oid_to_hex(&merge_base->object.oid),
 		    oid_to_hex(&side1->object.oid),
 		    oid_to_hex(&side2->object.oid));
@@ -4972,8 +4960,7 @@ redo:
 	trace2_region_leave("merge", "collect_merge_info", opt->repo);
 
 	trace2_region_enter("merge", "renames", opt->repo);
-	result->clean = detect_and_process_renames(opt, merge_base,
-						   side1, side2);
+	result->clean = detect_and_process_renames(opt);
 	trace2_region_leave("merge", "renames", opt->repo);
 	if (opt->priv->renames.redo_after_renames == 2) {
 		trace2_region_enter("merge", "reset_maps", opt->repo);
@@ -5017,7 +5004,7 @@ static void merge_ort_internal(struct merge_options *opt,
 	struct strbuf merge_base_abbrev = STRBUF_INIT;
 
 	if (!merge_bases) {
-		merge_bases = get_merge_bases(h1, h2);
+		merge_bases = repo_get_merge_bases(the_repository, h1, h2);
 		/* See merge-ort.h:merge_incore_recursive() declaration NOTE */
 		merge_bases = reverse_commit_list(merge_bases);
 	}
@@ -5095,7 +5082,7 @@ void merge_incore_nonrecursive(struct merge_options *opt,
 
 	trace2_region_enter("merge", "merge_start", opt->repo);
 	assert(opt->ancestor != NULL);
-	merge_check_renames_reusable(opt, result, merge_base, side1, side2);
+	merge_check_renames_reusable(result, merge_base, side1, side2);
 	merge_start(opt, result);
 	/*
 	 * Record the trees used in this merge, so if there's a next merge in

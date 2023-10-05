@@ -388,6 +388,20 @@ test_expect_success 'switch to branch checked out here' '
 	git rebase main main
 '
 
+test_expect_success 'switch to branch checked out elsewhere fails' '
+	test_when_finished "
+		git worktree remove wt1 &&
+		git worktree remove wt2 &&
+		git branch -d shared
+	" &&
+	git worktree add wt1 -b shared &&
+	git worktree add wt2 -f shared &&
+	# we test in both worktrees to ensure that works
+	# as expected with "first" and "next" worktrees
+	test_must_fail git -C wt1 rebase shared shared &&
+	test_must_fail git -C wt2 rebase shared shared
+'
+
 test_expect_success 'switch to branch not checked out' '
 	git checkout main &&
 	git branch other &&
@@ -407,7 +421,7 @@ test_expect_success 'refuse to switch to branch checked out elsewhere' '
 	git checkout main &&
 	git worktree add wt &&
 	test_must_fail git -C wt rebase main main 2>err &&
-	test_i18ngrep "already checked out" err
+	test_i18ngrep "already used by worktree at" err
 '
 
 test_expect_success MINGW,SYMLINKS_WINDOWS 'rebase when .git/logs is a symlink' '

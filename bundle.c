@@ -1,7 +1,10 @@
-#include "cache.h"
+#include "git-compat-util.h"
 #include "lockfile.h"
 #include "bundle.h"
-#include "object-store.h"
+#include "environment.h"
+#include "gettext.h"
+#include "hex.h"
+#include "object-store-ll.h"
 #include "repository.h"
 #include "object.h"
 #include "commit.h"
@@ -13,6 +16,7 @@
 #include "strvec.h"
 #include "list-objects-filter-options.h"
 #include "connected.h"
+#include "write-or-die.h"
 
 static const char v2_bundle_signature[] = "# v2 git bundle\n";
 static const char v3_bundle_signature[] = "# v3 git bundle\n";
@@ -267,10 +271,10 @@ int verify_bundle(struct repository *r,
 			list_refs(r, 0, NULL);
 		}
 
-		printf_ln("The bundle uses this hash algorithm: %s",
+		printf_ln(_("The bundle uses this hash algorithm: %s"),
 			  header->hash_algo->name);
 		if (header->filter.choice)
-			printf_ln("The bundle uses this filter: %s",
+			printf_ln(_("The bundle uses this filter: %s"),
 				  list_objects_filter_spec(&header->filter));
 	}
 cleanup:
@@ -293,7 +297,7 @@ static int is_tag_in_date_range(struct object *tag, struct rev_info *revs)
 	if (revs->max_age == -1 && revs->min_age == -1)
 		goto out;
 
-	buf = read_object_file(&tag->oid, &type, &size);
+	buf = repo_read_object_file(the_repository, &tag->oid, &type, &size);
 	if (!buf)
 		goto out;
 	line = memmem(buf, size, "\ntagger ", 8);
@@ -382,7 +386,8 @@ static int write_bundle_refs(int bundle_fd, struct rev_info *revs)
 
 		if (e->item->flags & UNINTERESTING)
 			continue;
-		if (dwim_ref(e->name, strlen(e->name), &oid, &ref, 0) != 1)
+		if (repo_dwim_ref(the_repository, e->name, strlen(e->name),
+				  &oid, &ref, 0) != 1)
 			goto skip_write_ref;
 		if (read_ref_full(e->name, RESOLVE_REF_READING, &oid, &flag))
 			flag = 0;
@@ -610,6 +615,10 @@ int unbundle(struct repository *r, struct bundle_header *header,
 	     enum verify_bundle_flags flags)
 {
 	struct child_process ip = CHILD_PROCESS_INIT;
+
+	if (verify_bundle(r, header, flags))
+		return -1;
+
 	strvec_pushl(&ip.args, "index-pack", "--fix-thin", "--stdin", NULL);
 
 	/* If there is a filter, then we need to create the promisor pack. */
@@ -621,8 +630,6 @@ int unbundle(struct repository *r, struct bundle_header *header,
 		strvec_clear(extra_index_pack_args);
 	}
 
-	if (verify_bundle(r, header, flags))
-		return -1;
 	ip.in = bundle_fd;
 	ip.no_stdout = 1;
 	ip.git_cmd = 1;

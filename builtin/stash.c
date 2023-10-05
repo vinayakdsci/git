@@ -1,6 +1,12 @@
-#define USE_THE_INDEX_COMPATIBILITY_MACROS
+#define USE_THE_INDEX_VARIABLE
 #include "builtin.h"
+#include "abspath.h"
 #include "config.h"
+#include "environment.h"
+#include "gettext.h"
+#include "hash.h"
+#include "hex.h"
+#include "object-name.h"
 #include "parse-options.h"
 #include "refs.h"
 #include "lockfile.h"
@@ -12,8 +18,12 @@
 #include "run-command.h"
 #include "dir.h"
 #include "entry.h"
+#include "preload-index.h"
+#include "read-cache.h"
 #include "rerere.h"
 #include "revision.h"
+#include "setup.h"
+#include "sparse-index.h"
 #include "log-tree.h"
 #include "diffcore.h"
 #include "exec-cmd.h"
@@ -201,7 +211,7 @@ static int get_stash_info(struct stash_info *info, int argc, const char **argv)
 
 	revision = info->revision.buf;
 
-	if (get_oid(revision, &info->w_commit))
+	if (repo_get_oid(the_repository, revision, &info->w_commit))
 		return error(_("%s is not a valid reference"), revision);
 
 	assert_stash_like(info, revision);
@@ -211,7 +221,8 @@ static int get_stash_info(struct stash_info *info, int argc, const char **argv)
 	end_of_rev = strchrnul(revision, '@');
 	strbuf_add(&symbolic, revision, end_of_rev - revision);
 
-	ret = dwim_ref(symbolic.buf, symbolic.len, &dummy, &expanded_ref, 0);
+	ret = repo_dwim_ref(the_repository, symbolic.buf, symbolic.len,
+			    &dummy, &expanded_ref, 0);
 	strbuf_release(&symbolic);
 	switch (ret) {
 	case 0: /* Not found, but valid ref */
@@ -231,7 +242,7 @@ static int get_stash_info(struct stash_info *info, int argc, const char **argv)
 static int do_clear_stash(void)
 {
 	struct object_id obj;
-	if (get_oid(ref_stash, &obj))
+	if (repo_get_oid(the_repository, ref_stash, &obj))
 		return 0;
 
 	return delete_ref(NULL, ref_stash, &obj, 0);
@@ -351,7 +362,7 @@ static int is_path_a_directory(const char *path)
 }
 
 static void add_diff_to_buf(struct diff_queue_struct *q,
-			    struct diff_options *options,
+			    struct diff_options *options UNUSED,
 			    void *data)
 {
 	int i;
@@ -427,7 +438,7 @@ static void unstage_changes_unless_new(struct object_id *orig_tree)
 	 * to the index before a merge was run) and the current index
 	 * (reflecting the changes brought in by the merge).
 	 */
-	diff_setup(&diff_opts);
+	repo_diff_setup(the_repository, &diff_opts);
 	diff_opts.flags.recursive = 1;
 	diff_opts.detect_rename = 0;
 	diff_opts.output_format = DIFF_FORMAT_NO_OUTPUT;
@@ -529,7 +540,8 @@ static int do_apply_stash(const char *prefix, struct stash_info *info,
 					 NULL, NULL, NULL))
 		return -1;
 
-	if (write_cache_as_tree(&c_tree, 0, NULL))
+	if (write_index_as_tree(&c_tree, &the_index, get_index_file(), 0,
+				NULL))
 		return error(_("cannot apply a stash in the middle of a merge"));
 
 	if (index) {
@@ -553,7 +565,8 @@ static int do_apply_stash(const char *prefix, struct stash_info *info,
 
 			discard_index(&the_index);
 			repo_read_index(the_repository);
-			if (write_cache_as_tree(&index_tree, 0, NULL))
+			if (write_index_as_tree(&index_tree, &the_index,
+						get_index_file(), 0, NULL))
 				return error(_("could not save index tree"));
 
 			reset_head();
@@ -598,7 +611,7 @@ static int do_apply_stash(const char *prefix, struct stash_info *info,
 		ret = error(_("could not write index"));
 
 	if (ret) {
-		rerere(0);
+		repo_rerere(the_repository, 0);
 
 		if (index)
 			fprintf_ln(stderr, _("Index was not unstashed."));
@@ -828,7 +841,8 @@ static int show_stat = 1;
 static int show_patch;
 static int show_include_untracked;
 
-static int git_stash_config(const char *var, const char *value, void *cb)
+static int git_stash_config(const char *var, const char *value,
+			    const struct config_context *ctx, void *cb)
 {
 	if (!strcmp(var, "stash.showstat")) {
 		show_stat = git_config_bool(var, value);
@@ -842,7 +856,7 @@ static int git_stash_config(const char *var, const char *value, void *cb)
 		show_include_untracked = git_config_bool(var, value);
 		return 0;
 	}
-	return git_diff_basic_config(var, value, cb);
+	return git_diff_basic_config(var, value, ctx, cb);
 }
 
 static void diff_include_untracked(const struct stash_info *info, struct diff_options *diff_opt)
@@ -898,7 +912,7 @@ static int show_stash(int argc, const char **argv, const char *prefix)
 
 	init_diff_ui_defaults();
 	git_config(git_diff_ui_config, NULL);
-	init_revisions(&rev, prefix);
+	repo_init_revisions(the_repository, &rev, prefix);
 
 	argc = parse_options(argc, argv, prefix, options, git_stash_show_usage,
 			     PARSE_OPT_KEEP_ARGV0 | PARSE_OPT_KEEP_UNKNOWN_OPT |
@@ -959,7 +973,7 @@ static int show_stash(int argc, const char **argv, const char *prefix)
 	}
 	log_tree_diff_flush(&rev);
 
-	ret = diff_result_code(&rev.diffopt, 0);
+	ret = diff_result_code(&rev.diffopt);
 cleanup:
 	strvec_clear(&stash_args);
 	free_stash_info(&info);
@@ -1075,19 +1089,18 @@ static int get_untracked_files(const struct pathspec *ps, int include_untracked,
  */
 static int check_changes_tracked_files(const struct pathspec *ps)
 {
-	int result;
 	struct rev_info rev;
 	struct object_id dummy;
 	int ret = 0;
 
 	/* No initial commit. */
-	if (get_oid("HEAD", &dummy))
+	if (repo_get_oid(the_repository, "HEAD", &dummy))
 		return -1;
 
 	if (repo_read_index(the_repository) < 0)
 		return -1;
 
-	init_revisions(&rev, NULL);
+	repo_init_revisions(the_repository, &rev, NULL);
 	copy_pathspec(&rev.prune_data, ps);
 
 	rev.diffopt.flags.quick = 1;
@@ -1097,14 +1110,14 @@ static int check_changes_tracked_files(const struct pathspec *ps)
 	add_head_to_pending(&rev);
 	diff_setup_done(&rev.diffopt);
 
-	result = run_diff_index(&rev, 1);
-	if (diff_result_code(&rev.diffopt, result)) {
+	run_diff_index(&rev, DIFF_INDEX_CACHED);
+	if (diff_result_code(&rev.diffopt)) {
 		ret = 1;
 		goto done;
 	}
 
-	result = run_diff_files(&rev, 0);
-	if (diff_result_code(&rev.diffopt, result)) {
+	run_diff_files(&rev, 0);
+	if (diff_result_code(&rev.diffopt)) {
 		ret = 1;
 		goto done;
 	}
@@ -1274,7 +1287,7 @@ static int stash_working_tree(struct stash_info *info, const struct pathspec *ps
 	struct strbuf diff_output = STRBUF_INIT;
 	struct index_state istate = INDEX_STATE_INIT(the_repository);
 
-	init_revisions(&rev, NULL);
+	repo_init_revisions(the_repository, &rev, NULL);
 	copy_pathspec(&rev.prune_data, ps);
 
 	set_alternate_index_output(stash_index_path.buf);
@@ -1295,10 +1308,7 @@ static int stash_working_tree(struct stash_info *info, const struct pathspec *ps
 
 	add_pending_object(&rev, parse_object(the_repository, &info->b_commit),
 			   "");
-	if (run_diff_index(&rev, 0)) {
-		ret = -1;
-		goto done;
-	}
+	run_diff_index(&rev, 0);
 
 	cp_upd_index.git_cmd = 1;
 	strvec_pushl(&cp_upd_index.args, "update-index",
@@ -1353,7 +1363,7 @@ static int do_create_stash(const struct pathspec *ps, struct strbuf *stash_msg_b
 		goto done;
 	}
 
-	if (get_oid("HEAD", &info->b_commit)) {
+	if (repo_get_oid(the_repository, "HEAD", &info->b_commit)) {
 		if (!quiet)
 			fprintf_ln(stderr, _("You do not have "
 					     "the initial commit yet"));
@@ -1371,14 +1381,16 @@ static int do_create_stash(const struct pathspec *ps, struct strbuf *stash_msg_b
 	branch_ref = resolve_ref_unsafe("HEAD", 0, NULL, &flags);
 	if (flags & REF_ISSYMREF)
 		skip_prefix(branch_ref, "refs/heads/", &branch_name);
-	head_short_sha1 = find_unique_abbrev(&head_commit->object.oid,
-					     DEFAULT_ABBREV);
+	head_short_sha1 = repo_find_unique_abbrev(the_repository,
+						  &head_commit->object.oid,
+						  DEFAULT_ABBREV);
 	strbuf_addf(&msg, "%s: %s ", branch_name, head_short_sha1);
 	pp_commit_easy(CMIT_FMT_ONELINE, head_commit, &msg);
 
 	strbuf_addf(&commit_tree_label, "index on %s\n", msg.buf);
 	commit_list_insert(head_commit, &parents);
-	if (write_cache_as_tree(&info->i_tree, 0, NULL) ||
+	if (write_index_as_tree(&info->i_tree, &the_index, get_index_file(), 0,
+				NULL) ||
 	    commit_tree(commit_tree_label.buf, commit_tree_label.len,
 			&info->i_tree, parents, &info->i_commit, NULL, NULL)) {
 		if (!quiet)
@@ -1462,7 +1474,7 @@ done:
 	return ret;
 }
 
-static int create_stash(int argc, const char **argv, const char *prefix)
+static int create_stash(int argc, const char **argv, const char *prefix UNUSED)
 {
 	int ret;
 	struct strbuf stash_msg_buf = STRBUF_INIT;
@@ -1728,6 +1740,7 @@ static int push_stash(int argc, const char **argv, const char *prefix,
 		OPT_PATHSPEC_FILE_NUL(&pathspec_file_nul),
 		OPT_END()
 	};
+	int ret;
 
 	if (argc) {
 		force_assume = !strcmp(argv[0], "-p");
@@ -1767,8 +1780,10 @@ static int push_stash(int argc, const char **argv, const char *prefix,
 		die(_("the option '%s' requires '%s'"), "--pathspec-file-nul", "--pathspec-from-file");
 	}
 
-	return do_push_stash(&ps, stash_msg, quiet, keep_index, patch_mode,
-			     include_untracked, only_staged);
+	ret = do_push_stash(&ps, stash_msg, quiet, keep_index, patch_mode,
+			    include_untracked, only_staged);
+	clear_pathspec(&ps);
+	return ret;
 }
 
 static int push_stash_unassumed(int argc, const char **argv, const char *prefix)

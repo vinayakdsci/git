@@ -1,5 +1,6 @@
-#include "cache.h"
+#include "git-compat-util.h"
 #include "config.h"
+#include "gettext.h"
 #include "repository.h"
 #include "fsmonitor-ipc.h"
 #include "fsmonitor-settings.h"
@@ -61,7 +62,8 @@ static enum fsmonitor_reason check_remote(struct repository *r)
 }
 #endif
 
-static enum fsmonitor_reason check_for_incompatible(struct repository *r, int ipc)
+static enum fsmonitor_reason check_for_incompatible(struct repository *r,
+						    int ipc MAYBE_UNUSED)
 {
 	if (!r->worktree) {
 		/*

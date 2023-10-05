@@ -1118,58 +1118,60 @@ test_expect_success 'fetching with auto-gc does not lock up' '
 	)
 '
 
-test_expect_success 'fetch aligned output' '
-	git clone . full-output &&
-	test_commit looooooooooooong-tag &&
-	(
-		cd full-output &&
-		git -c fetch.output=full fetch origin >actual 2>&1 &&
-		grep -e "->" actual | cut -c 22- >../actual
-	) &&
-	cat >expect <<-\EOF &&
-	main                 -> origin/main
-	looooooooooooong-tag -> looooooooooooong-tag
-	EOF
-	test_cmp expect actual
+for section in fetch transfer
+do
+	test_expect_success "$section.hideRefs affects connectivity check" '
+		GIT_TRACE="$PWD"/trace git -c $section.hideRefs=refs -c \
+			$section.hideRefs="!refs/tags/" fetch &&
+		grep "git rev-list .*--exclude-hidden=fetch" trace
+	'
+done
+
+test_expect_success 'prepare source branch' '
+	echo one >onebranch &&
+	git checkout --orphan onebranch &&
+	git rm --cached -r . &&
+	git add onebranch &&
+	git commit -m onebranch &&
+	git rev-list --objects onebranch -- >actual &&
+	# 3 objects should be created, at least ...
+	test 3 -le $(wc -l <actual)
 '
 
-test_expect_success 'fetch compact output' '
-	git clone . compact &&
-	test_commit extraaa &&
-	(
-		cd compact &&
-		git -c fetch.output=compact fetch origin >actual 2>&1 &&
-		grep -e "->" actual | cut -c 22- >../actual
-	) &&
-	cat >expect <<-\EOF &&
-	main       -> origin/*
-	extraaa    -> *
-	EOF
-	test_cmp expect actual
-'
+validate_store_type () {
+	git -C dest count-objects -v >actual &&
+	case "$store_type" in
+	packed)
+		grep "^count: 0$" actual ;;
+	loose)
+		grep "^packs: 0$" actual ;;
+	esac || {
+		echo "store_type is $store_type"
+		cat actual
+		false
+	}
+}
 
-test_expect_success '--no-show-forced-updates' '
-	mkdir forced-updates &&
-	(
-		cd forced-updates &&
-		git init &&
-		test_commit 1 &&
-		test_commit 2
-	) &&
-	git clone forced-updates forced-update-clone &&
-	git clone forced-updates no-forced-update-clone &&
-	git -C forced-updates reset --hard HEAD~1 &&
-	(
-		cd forced-update-clone &&
-		git fetch --show-forced-updates origin 2>output &&
-		test_i18ngrep "(forced update)" output
-	) &&
-	(
-		cd no-forced-update-clone &&
-		git fetch --no-show-forced-updates origin 2>output &&
-		test_i18ngrep ! "(forced update)" output
-	)
-'
+test_unpack_limit () {
+	store_type=$1
+
+	case "$store_type" in
+	packed) fetch_limit=1 transfer_limit=10000 ;;
+	loose) fetch_limit=10000 transfer_limit=1 ;;
+	esac
+
+	test_expect_success "fetch trumps transfer limit" '
+		rm -fr dest &&
+		git --bare init dest &&
+		git -C dest config fetch.unpacklimit $fetch_limit &&
+		git -C dest config transfer.unpacklimit $transfer_limit &&
+		git -C dest fetch .. onebranch &&
+		validate_store_type
+	'
+}
+
+test_unpack_limit packed
+test_unpack_limit loose
 
 setup_negotiation_tip () {
 	SERVER="$1"

@@ -1,14 +1,6 @@
 #!/bin/sh
 
-test_description='test cherry-pick and revert with renames
-
-  --
-   + rename2: renames oops to opos
-  +  rename1: renames oops to spoo
-  +  added:   adds extra line to oops
-  ++ initial: has lines in oops
-
-'
+test_description='miscellaneous basic tests for cherry-pick and revert'
 
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
@@ -62,6 +54,14 @@ test_expect_success 'revert --nonsense' '
 	git diff --exit-code HEAD "$pos" &&
 	test_i18ngrep "[Uu]sage:" msg
 '
+
+# the following two test cherry-pick and revert with renames
+#
+# --
+#  + rename2: renames oops to opos
+# +  rename1: renames oops to spoo
+# +  added:   adds extra line to oops
+# ++ initial: has lines in oops
 
 test_expect_success 'cherry-pick after renaming branch' '
 
@@ -174,6 +174,29 @@ test_expect_success 'advice from failed revert' '
 	test_commit --append --no-tag "double-add dream" dream dream &&
 	test_must_fail git revert HEAD^ 2>actual &&
 	test_cmp expected actual
+'
+
+test_expect_subject () {
+	echo "$1" >expect &&
+	git log -1 --pretty=%s >actual &&
+	test_cmp expect actual
+}
+
+test_expect_success 'titles of fresh reverts' '
+	test_commit --no-tag A file1 &&
+	test_commit --no-tag B file1 &&
+	git revert --no-edit HEAD &&
+	test_expect_subject "Revert \"B\"" &&
+	git revert --no-edit HEAD &&
+	test_expect_subject "Reapply \"B\"" &&
+	git revert --no-edit HEAD &&
+	test_expect_subject "Revert \"Reapply \"B\"\""
+'
+
+test_expect_success 'title of legacy double revert' '
+	test_commit --no-tag "Revert \"Revert \"B\"\"" file1 &&
+	git revert --no-edit HEAD &&
+	test_expect_subject "Revert \"Revert \"Revert \"B\"\"\""
 '
 
 test_expect_success 'identification of reverted commit (default)' '

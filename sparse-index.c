@@ -1,4 +1,8 @@
-#include "cache.h"
+#include "git-compat-util.h"
+#include "environment.h"
+#include "gettext.h"
+#include "name-hash.h"
+#include "read-cache-ll.h"
 #include "repository.h"
 #include "sparse-index.h"
 #include "tree.h"
@@ -7,7 +11,7 @@
 #include "cache-tree.h"
 #include "config.h"
 #include "dir.h"
-#include "fsmonitor.h"
+#include "fsmonitor-ll.h"
 
 struct modify_index_context {
 	struct index_state *write;
@@ -387,7 +391,7 @@ void expand_index(struct index_state *istate, struct pattern_list *pl)
 		strbuf_setlen(&base, 0);
 		strbuf_add(&base, ce->name, strlen(ce->name));
 
-		read_tree_at(istate->repo, tree, &base, &ps,
+		read_tree_at(istate->repo, tree, &base, 0, &ps,
 			     add_path_to_index, &ctx);
 
 		/* free directory entries. full entries are re-used */

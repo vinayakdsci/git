@@ -1,9 +1,10 @@
 #include "test-tool.h"
-#include "cache.h"
 #include "strvec.h"
 #include "run-command.h"
 #include "exec-cmd.h"
 #include "config.h"
+#include "repository.h"
+#include "trace2.h"
 
 typedef int(fn_unit_test)(int argc, const char **argv);
 
@@ -44,7 +45,7 @@ static int get_i(int *p_value, const char *data)
  * [] "def_param" events for all of the "interesting" pre-defined
  * config settings.
  */
-static int ut_001return(int argc, const char **argv)
+static int ut_001return(int argc UNUSED, const char **argv)
 {
 	int rc;
 
@@ -64,7 +65,7 @@ static int ut_001return(int argc, const char **argv)
  * [] "def_param" events for all of the "interesting" pre-defined
  * config settings.
  */
-static int ut_002exit(int argc, const char **argv)
+static int ut_002exit(int argc UNUSED, const char **argv)
 {
 	int rc;
 
@@ -200,7 +201,7 @@ static int ut_006data(int argc, const char **argv)
 	return 0;
 }
 
-static int ut_007BUG(int argc, const char **argv)
+static int ut_007BUG(int argc UNUSED, const char **argv UNUSED)
 {
 	/*
 	 * Exercise BUG() to ensure that the message is printed to trace2.
@@ -208,7 +209,7 @@ static int ut_007BUG(int argc, const char **argv)
 	BUG("the bug message");
 }
 
-static int ut_008bug(int argc, const char **argv)
+static int ut_008bug(int argc UNUSED, const char **argv UNUSED)
 {
 	bug("a bug message");
 	bug("another bug message");
@@ -216,7 +217,7 @@ static int ut_008bug(int argc, const char **argv)
 	return 0;
 }
 
-static int ut_009bug_BUG(int argc, const char **argv)
+static int ut_009bug_BUG(int argc UNUSED, const char **argv UNUSED)
 {
 	bug("a bug message");
 	bug("another bug message");
@@ -224,7 +225,7 @@ static int ut_009bug_BUG(int argc, const char **argv)
 	return 0;
 }
 
-static int ut_010bug_BUG(int argc, const char **argv)
+static int ut_010bug_BUG(int argc UNUSED, const char **argv UNUSED)
 {
 	bug("a %s message", "bug");
 	BUG("a %s message", "BUG");

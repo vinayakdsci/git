@@ -1,7 +1,10 @@
-#include "cache.h"
+#include "git-compat-util.h"
 #include "bundle-uri.h"
 #include "bundle.h"
-#include "object-store.h"
+#include "copy.h"
+#include "environment.h"
+#include "gettext.h"
+#include "object-store-ll.h"
 #include "refs.h"
 #include "run-command.h"
 #include "hashmap.h"
@@ -17,7 +20,7 @@ static struct {
 	{ BUNDLE_HEURISTIC_CREATIONTOKEN, "creationToken" },
 };
 
-static int compare_bundles(const void *hashmap_cmp_fn_data,
+static int compare_bundles(const void *hashmap_cmp_fn_data UNUSED,
 			   const struct hashmap_entry *he1,
 			   const struct hashmap_entry *he2,
 			   const void *id)
@@ -42,7 +45,7 @@ void init_bundle_list(struct bundle_list *list)
 }
 
 static int clear_remote_bundle_info(struct remote_bundle_info *bundle,
-				    void *data)
+				    void *data UNUSED)
 {
 	FREE_AND_NULL(bundle->id);
 	FREE_AND_NULL(bundle->uri);
@@ -221,7 +224,9 @@ static int bundle_list_update(const char *key, const char *value,
 	return 0;
 }
 
-static int config_to_bundle_list(const char *key, const char *value, void *data)
+static int config_to_bundle_list(const char *key, const char *value,
+				 const struct config_context *ctx UNUSED,
+				 void *data)
 {
 	struct bundle_list *list = data;
 	return bundle_list_update(key, value, list);
@@ -250,6 +255,7 @@ int bundle_uri_parse_config_format(const char *uri,
 	}
 	result = git_config_from_file_with_options(config_to_bundle_list,
 						   filename, list,
+						   CONFIG_SCOPE_UNKNOWN,
 						   &opts);
 
 	if (!result && list->mode == BUNDLE_MODE_NONE) {
@@ -773,7 +779,7 @@ static int unbundle_all_bundles(struct repository *r,
 	return 0;
 }
 
-static int unlink_bundle(struct remote_bundle_info *info, void *data)
+static int unlink_bundle(struct remote_bundle_info *info, void *data UNUSED)
 {
 	if (info->file)
 		unlink_or_warn(info->file);
@@ -791,6 +797,15 @@ int fetch_bundle_uri(struct repository *r, const char *uri,
 	};
 
 	init_bundle_list(&list);
+
+	/*
+	 * Do not fetch an empty bundle URI. An empty bundle URI
+	 * could signal that a configured bundle URI has been disabled.
+	 */
+	if (!*uri) {
+		result = 0;
+		goto cleanup;
+	}
 
 	/* If a bundle is added to this global list, then it is required. */
 	list.mode = BUNDLE_MODE_ALL;
@@ -859,7 +874,9 @@ cached:
 	return advertise_bundle_uri;
 }
 
-static int config_to_packet_line(const char *key, const char *value, void *data)
+static int config_to_packet_line(const char *key, const char *value,
+				 const struct config_context *ctx UNUSED,
+				 void *data)
 {
 	struct packet_reader *writer = data;
 
@@ -884,7 +901,7 @@ int bundle_uri_command(struct repository *r,
 	 * Read all "bundle.*" config lines to the client as key=value
 	 * packet lines.
 	 */
-	git_config(config_to_packet_line, &writer);
+	repo_config(r, config_to_packet_line, &writer);
 
 	packet_writer_flush(&writer);
 

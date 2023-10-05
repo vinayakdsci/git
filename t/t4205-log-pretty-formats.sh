@@ -576,6 +576,38 @@ test_expect_success 'clean log decoration' '
 	test_cmp expected actual1
 '
 
+test_expect_success 'pretty format %decorate' '
+	git checkout -b foo &&
+	git commit --allow-empty -m "new commit" &&
+	git tag bar &&
+	git branch qux &&
+
+	echo " (HEAD -> foo, tag: bar, qux)" >expect1 &&
+	git log --format="%(decorate)" -1 >actual1 &&
+	test_cmp expect1 actual1 &&
+
+	echo "HEAD -> foo, tag: bar, qux" >expect2 &&
+	git log --format="%(decorate:prefix=,suffix=)" -1 >actual2 &&
+	test_cmp expect2 actual2 &&
+
+	echo "[ HEAD -> foo; tag: bar; qux ]" >expect3 &&
+	git log --format="%(decorate:prefix=[ ,suffix= ],separator=%x3B )" \
+		-1 >actual3 &&
+	test_cmp expect3 actual3 &&
+
+	# Try with a typo (in "separator"), in which case the placeholder should
+	# not be replaced.
+	echo "%(decorate:prefix=[ ,suffix= ],separater=; )" >expect4 &&
+	git log --format="%(decorate:prefix=[ ,suffix= ],separater=%x3B )" \
+		-1 >actual4 &&
+	test_cmp expect4 actual4 &&
+
+	echo "HEAD->foo bar qux" >expect5 &&
+	git log --format="%(decorate:prefix=,suffix=,separator= ,tag=,pointer=->)" \
+		-1 >actual5 &&
+	test_cmp expect5 actual5
+'
+
 cat >trailers <<EOF
 Signed-off-by: A U Thor <author@example.com>
 Acked-by: A U Thor <author@example.com>
@@ -1012,10 +1044,25 @@ test_expect_success '%(describe:tags) vs git describe --tags' '
 
 test_expect_success '%(describe:abbrev=...) vs git describe --abbrev=...' '
 	test_when_finished "git tag -d tagname" &&
+
+	# Case 1: We have commits between HEAD and the most recent tag
+	#	  reachable from it
+	test_commit --no-tag file &&
+	git describe --abbrev=15 >expect &&
+	git log -1 --format="%(describe:abbrev=15)" >actual &&
+	test_cmp expect actual &&
+
+	# Make sure the hash used is at least 15 digits long
+	sed -e "s/^.*-g\([0-9a-f]*\)$/\1/" <actual >hexpart &&
+	test 16 -le $(wc -c <hexpart) &&
+
+	# Case 2: We have a tag at HEAD, describe directly gives the
+	#	  name of the tag
 	git tag -a -m tagged tagname &&
 	git describe --abbrev=15 >expect &&
 	git log -1 --format="%(describe:abbrev=15)" >actual &&
-	test_cmp expect actual
+	test_cmp expect actual &&
+	test tagname = $(cat actual)
 '
 
 test_expect_success 'log --pretty with space stealing' '

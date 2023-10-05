@@ -11,6 +11,10 @@
  */
 
 #include "builtin.h"
+#include "abspath.h"
+#include "date.h"
+#include "environment.h"
+#include "hex.h"
 #include "repository.h"
 #include "config.h"
 #include "tempfile.h"
@@ -22,16 +26,21 @@
 #include "commit.h"
 #include "commit-graph.h"
 #include "packfile.h"
-#include "object-store.h"
+#include "object-file.h"
+#include "object-store-ll.h"
 #include "pack.h"
 #include "pack-objects.h"
+#include "path.h"
 #include "blob.h"
 #include "tree.h"
 #include "promisor-remote.h"
 #include "refs.h"
 #include "remote.h"
 #include "exec-cmd.h"
+#include "gettext.h"
 #include "hook.h"
+#include "setup.h"
+#include "trace2.h"
 
 #define FAILED_RUN "failed to run %s"
 
@@ -42,7 +51,7 @@ static const char * const builtin_gc_usage[] = {
 
 static int pack_refs = 1;
 static int prune_reflogs = 1;
-static int cruft_packs = -1;
+static int cruft_packs = 1;
 static int aggressive_depth = 50;
 static int aggressive_window = 250;
 static int gc_auto_threshold = 6700;
@@ -213,7 +222,7 @@ static struct packed_git *find_base_packs(struct string_list *packs,
 	struct packed_git *p, *base = NULL;
 
 	for (p = get_all_packs(the_repository); p; p = p->next) {
-		if (!p->pack_local)
+		if (!p->pack_local || p->is_cruft)
 			continue;
 		if (limit) {
 			if (p->pack_size >= limit)
@@ -284,7 +293,7 @@ static uint64_t total_ram(void)
 
 static uint64_t estimate_repack_memory(struct packed_git *pack)
 {
-	unsigned long nr_objects = approximate_object_count();
+	unsigned long nr_objects = repo_approximate_object_count(the_repository);
 	size_t os_cache, heap;
 
 	if (!pack || !nr_objects)
@@ -602,10 +611,6 @@ int cmd_gc(int argc, const char **argv, const char *prefix)
 	if (prune_expire && parse_expiry_date(prune_expire, &dummy))
 		die(_("failed to parse prune expiry value %s"), prune_expire);
 
-	prepare_repo_settings(the_repository);
-	if (cruft_packs < 0)
-		cruft_packs = the_repository->settings.gc_cruft_packs;
-
 	if (aggressive) {
 		strvec_push(&repack, "-f");
 		if (aggressive_depth > 0)
@@ -699,7 +704,7 @@ int cmd_gc(int argc, const char **argv, const char *prefix)
 			strvec_push(&prune, prune_expire);
 			if (quiet)
 				strvec_push(&prune, "--no-progress");
-			if (has_promisor_remote())
+			if (repo_has_promisor_remote(the_repository))
 				strvec_push(&prune,
 					    "--exclude-promisor-objects");
 			prune_cmd.git_cmd = 1;
@@ -820,7 +825,7 @@ static int dfs_on_ref(const char *refname UNUSED,
 	commit = lookup_commit(the_repository, oid);
 	if (!commit)
 		return 0;
-	if (parse_commit(commit) ||
+	if (repo_parse_commit(the_repository, commit) ||
 	    commit_graph_position(commit) != COMMIT_NOT_FROM_GRAPH)
 		return 0;
 
@@ -837,7 +842,7 @@ static int dfs_on_ref(const char *refname UNUSED,
 		commit = pop_commit(&stack);
 
 		for (parent = commit->parents; parent; parent = parent->next) {
-			if (parse_commit(parent->item) ||
+			if (repo_parse_commit(the_repository, parent->item) ||
 			    commit_graph_position(parent->item) != COMMIT_NOT_FROM_GRAPH ||
 			    parent->item->object.flags & SEEN)
 				continue;
@@ -976,9 +981,9 @@ struct write_loose_object_data {
 
 static int loose_object_auto_limit = 100;
 
-static int loose_object_count(const struct object_id *oid,
-			       const char *path,
-			       void *data)
+static int loose_object_count(const struct object_id *oid UNUSED,
+			      const char *path UNUSED,
+			      void *data)
 {
 	int *count = (int*)data;
 	if (++(*count) >= loose_object_auto_limit)
@@ -1003,15 +1008,15 @@ static int loose_object_auto_condition(void)
 					     NULL, NULL, &count);
 }
 
-static int bail_on_loose(const struct object_id *oid,
-			 const char *path,
-			 void *data)
+static int bail_on_loose(const struct object_id *oid UNUSED,
+			 const char *path UNUSED,
+			 void *data UNUSED)
 {
 	return 1;
 }
 
 static int write_loose_object_to_stdin(const struct object_id *oid,
-				       const char *path,
+				       const char *path UNUSED,
 				       void *data)
 {
 	struct write_loose_object_data *d = (struct write_loose_object_data *)data;
@@ -1398,7 +1403,7 @@ static void initialize_task_config(int schedule)
 	strbuf_release(&config_name);
 }
 
-static int task_option_parse(const struct option *opt,
+static int task_option_parse(const struct option *opt UNUSED,
 			     const char *arg, int unset)
 {
 	int i, num_selected = 0;
@@ -1493,7 +1498,6 @@ static int maintenance_register(int argc, const char **argv, const char *prefix)
 	};
 	int found = 0;
 	const char *key = "maintenance.repo";
-	char *config_value;
 	char *maintpath = get_maintpath();
 	struct string_list_item *item;
 	const struct string_list *list;
@@ -1508,13 +1512,10 @@ static int maintenance_register(int argc, const char **argv, const char *prefix)
 	git_config_set("maintenance.auto", "false");
 
 	/* Set maintenance strategy, if unset */
-	if (!git_config_get_string("maintenance.strategy", &config_value))
-		free(config_value);
-	else
+	if (git_config_get("maintenance.strategy"))
 		git_config_set("maintenance.strategy", "incremental");
 
-	list = git_config_get_value_multi(key);
-	if (list) {
+	if (!git_config_get_string_multi(key, &list)) {
 		for_each_string_list_item(item, list) {
 			if (!strcmp(maintpath, item->string)) {
 				found = 1;
@@ -1580,11 +1581,10 @@ static int maintenance_unregister(int argc, const char **argv, const char *prefi
 	if (config_file) {
 		git_configset_init(&cs);
 		git_configset_add_file(&cs, config_file);
-		list = git_configset_get_value_multi(&cs, key);
-	} else {
-		list = git_config_get_value_multi(key);
 	}
-	if (list) {
+	if (!(config_file
+	      ? git_configset_get_string_multi(&cs, key, &list)
+	      : git_config_get_string_multi(key, &list))) {
 		for_each_string_list_item(item, list) {
 			if (!strcmp(maintpath, item->string)) {
 				found = 1;
@@ -1686,11 +1686,11 @@ static int get_schedule_cmd(const char **cmd, int *is_available)
 	if (is_available)
 		*is_available = 0;
 
-	string_list_split_in_place(&list, testing, ',', -1);
+	string_list_split_in_place(&list, testing, ",", -1);
 	for_each_string_list_item(item, &list) {
 		struct string_list pair = STRING_LIST_INIT_NODUP;
 
-		if (string_list_split_in_place(&pair, item->string, ':', 2) != 2)
+		if (string_list_split_in_place(&pair, item->string, ":", 2) != 2)
 			continue;
 
 		if (!strcmp(*cmd, pair.items[0].string)) {
@@ -1706,6 +1706,15 @@ static int get_schedule_cmd(const char **cmd, int *is_available)
 	string_list_clear(&list, 0);
 	free(testing);
 	return 1;
+}
+
+static int get_random_minute(void)
+{
+	/* Use a static value when under tests. */
+	if (getenv("GIT_TEST_MAINT_SCHEDULER"))
+		return 13;
+
+	return git_rand() % 60;
 }
 
 static int is_launchctl_available(void)
@@ -1820,6 +1829,7 @@ static int launchctl_schedule_plist(const char *exec_path, enum schedule_priorit
 	struct strbuf plist = STRBUF_INIT, plist2 = STRBUF_INIT;
 	struct stat st;
 	const char *cmd = "launchctl";
+	int minute = get_random_minute();
 
 	get_schedule_cmd(&cmd, NULL);
 	preamble = "<?xml version=\"1.0\"?>\n"
@@ -1845,29 +1855,30 @@ static int launchctl_schedule_plist(const char *exec_path, enum schedule_priorit
 	case SCHEDULE_HOURLY:
 		repeat = "<dict>\n"
 			 "<key>Hour</key><integer>%d</integer>\n"
-			 "<key>Minute</key><integer>0</integer>\n"
+			 "<key>Minute</key><integer>%d</integer>\n"
 			 "</dict>\n";
 		for (i = 1; i <= 23; i++)
-			strbuf_addf(&plist, repeat, i);
+			strbuf_addf(&plist, repeat, i, minute);
 		break;
 
 	case SCHEDULE_DAILY:
 		repeat = "<dict>\n"
 			 "<key>Day</key><integer>%d</integer>\n"
 			 "<key>Hour</key><integer>0</integer>\n"
-			 "<key>Minute</key><integer>0</integer>\n"
+			 "<key>Minute</key><integer>%d</integer>\n"
 			 "</dict>\n";
 		for (i = 1; i <= 6; i++)
-			strbuf_addf(&plist, repeat, i);
+			strbuf_addf(&plist, repeat, i, minute);
 		break;
 
 	case SCHEDULE_WEEKLY:
-		strbuf_addstr(&plist,
-			      "<dict>\n"
-			      "<key>Day</key><integer>0</integer>\n"
-			      "<key>Hour</key><integer>0</integer>\n"
-			      "<key>Minute</key><integer>0</integer>\n"
-			      "</dict>\n");
+		strbuf_addf(&plist,
+			    "<dict>\n"
+			    "<key>Day</key><integer>0</integer>\n"
+			    "<key>Hour</key><integer>0</integer>\n"
+			    "<key>Minute</key><integer>%d</integer>\n"
+			    "</dict>\n",
+			    minute);
 		break;
 
 	default:
@@ -1923,7 +1934,7 @@ static int launchctl_add_plists(void)
 	       launchctl_schedule_plist(exec_path, SCHEDULE_WEEKLY);
 }
 
-static int launchctl_update_schedule(int run_maintenance, int fd)
+static int launchctl_update_schedule(int run_maintenance, int fd UNUSED)
 {
 	if (run_maintenance)
 		return launchctl_add_plists();
@@ -1984,6 +1995,7 @@ static int schtasks_schedule_task(const char *exec_path, enum schedule_priority 
 	const char *frequency = get_frequency(schedule);
 	char *name = schtasks_task_name(frequency);
 	struct strbuf tfilename = STRBUF_INIT;
+	int minute = get_random_minute();
 
 	get_schedule_cmd(&cmd, NULL);
 
@@ -2004,7 +2016,7 @@ static int schtasks_schedule_task(const char *exec_path, enum schedule_priority 
 	switch (schedule) {
 	case SCHEDULE_HOURLY:
 		fprintf(tfile->fp,
-			"<StartBoundary>2020-01-01T01:00:00</StartBoundary>\n"
+			"<StartBoundary>2020-01-01T01:%02d:00</StartBoundary>\n"
 			"<Enabled>true</Enabled>\n"
 			"<ScheduleByDay>\n"
 			"<DaysInterval>1</DaysInterval>\n"
@@ -2013,12 +2025,13 @@ static int schtasks_schedule_task(const char *exec_path, enum schedule_priority 
 			"<Interval>PT1H</Interval>\n"
 			"<Duration>PT23H</Duration>\n"
 			"<StopAtDurationEnd>false</StopAtDurationEnd>\n"
-			"</Repetition>\n");
+			"</Repetition>\n",
+			minute);
 		break;
 
 	case SCHEDULE_DAILY:
 		fprintf(tfile->fp,
-			"<StartBoundary>2020-01-01T00:00:00</StartBoundary>\n"
+			"<StartBoundary>2020-01-01T00:%02d:00</StartBoundary>\n"
 			"<Enabled>true</Enabled>\n"
 			"<ScheduleByWeek>\n"
 			"<DaysOfWeek>\n"
@@ -2030,19 +2043,21 @@ static int schtasks_schedule_task(const char *exec_path, enum schedule_priority 
 			"<Saturday />\n"
 			"</DaysOfWeek>\n"
 			"<WeeksInterval>1</WeeksInterval>\n"
-			"</ScheduleByWeek>\n");
+			"</ScheduleByWeek>\n",
+			minute);
 		break;
 
 	case SCHEDULE_WEEKLY:
 		fprintf(tfile->fp,
-			"<StartBoundary>2020-01-01T00:00:00</StartBoundary>\n"
+			"<StartBoundary>2020-01-01T00:%02d:00</StartBoundary>\n"
 			"<Enabled>true</Enabled>\n"
 			"<ScheduleByWeek>\n"
 			"<DaysOfWeek>\n"
 			"<Sunday />\n"
 			"</DaysOfWeek>\n"
 			"<WeeksInterval>1</WeeksInterval>\n"
-			"</ScheduleByWeek>\n");
+			"</ScheduleByWeek>\n",
+			minute);
 		break;
 
 	default:
@@ -2068,7 +2083,7 @@ static int schtasks_schedule_task(const char *exec_path, enum schedule_priority 
 	      "</Settings>\n"
 	      "<Actions Context=\"Author\">\n"
 	      "<Exec>\n"
-	      "<Command>\"%s\\git.exe\"</Command>\n"
+	      "<Command>\"%s\\headless-git.exe\"</Command>\n"
 	      "<Arguments>--exec-path=\"%s\" for-each-repo --config=maintenance.repo maintenance run --schedule=%s</Arguments>\n"
 	      "</Exec>\n"
 	      "</Actions>\n"
@@ -2100,7 +2115,7 @@ static int schtasks_schedule_tasks(void)
 	       schtasks_schedule_task(exec_path, SCHEDULE_WEEKLY);
 }
 
-static int schtasks_update_schedule(int run_maintenance, int fd)
+static int schtasks_update_schedule(int run_maintenance, int fd UNUSED)
 {
 	if (run_maintenance)
 		return schtasks_schedule_tasks();
@@ -2159,6 +2174,7 @@ static int crontab_update_schedule(int run_maintenance, int fd)
 	FILE *cron_list, *cron_in;
 	struct strbuf line = STRBUF_INIT;
 	struct tempfile *tmpedit = NULL;
+	int minute = get_random_minute();
 
 	get_schedule_cmd(&cmd, NULL);
 	strvec_split(&crontab_list.args, cmd);
@@ -2213,11 +2229,11 @@ static int crontab_update_schedule(int run_maintenance, int fd)
 			"# replaced in the future by a Git command.\n\n");
 
 		strbuf_addf(&line_format,
-			    "%%s %%s * * %%s \"%s/git\" --exec-path=\"%s\" for-each-repo --config=maintenance.repo maintenance run --schedule=%%s\n",
+			    "%%d %%s * * %%s \"%s/git\" --exec-path=\"%s\" for-each-repo --config=maintenance.repo maintenance run --schedule=%%s\n",
 			    exec_path, exec_path);
-		fprintf(cron_in, line_format.buf, "0", "1-23", "*", "hourly");
-		fprintf(cron_in, line_format.buf, "0", "0", "1-6", "daily");
-		fprintf(cron_in, line_format.buf, "0", "0", "0", "weekly");
+		fprintf(cron_in, line_format.buf, minute, "1-23", "*", "hourly");
+		fprintf(cron_in, line_format.buf, minute, "0", "1-6", "daily");
+		fprintf(cron_in, line_format.buf, minute, "0", "0", "weekly");
 		strbuf_release(&line_format);
 
 		fprintf(cron_in, "\n%s\n", END_LINE);
@@ -2276,77 +2292,54 @@ static char *xdg_config_home_systemd(const char *filename)
 	return xdg_config_home_for("systemd/user", filename);
 }
 
-static int systemd_timer_enable_unit(int enable,
-				     enum schedule_priority schedule)
-{
-	const char *cmd = "systemctl";
-	struct child_process child = CHILD_PROCESS_INIT;
-	const char *frequency = get_frequency(schedule);
+#define SYSTEMD_UNIT_FORMAT "git-maintenance@%s.%s"
 
-	/*
-	 * Disabling the systemd unit while it is already disabled makes
-	 * systemctl print an error.
-	 * Let's ignore it since it means we already are in the expected state:
-	 * the unit is disabled.
-	 *
-	 * On the other hand, enabling a systemd unit which is already enabled
-	 * produces no error.
-	 */
-	if (!enable)
-		child.no_stderr = 1;
-
-	get_schedule_cmd(&cmd, NULL);
-	strvec_split(&child.args, cmd);
-	strvec_pushl(&child.args, "--user", enable ? "enable" : "disable",
-		     "--now", NULL);
-	strvec_pushf(&child.args, "git-maintenance@%s.timer", frequency);
-
-	if (start_command(&child))
-		return error(_("failed to start systemctl"));
-	if (finish_command(&child))
-		/*
-		 * Disabling an already disabled systemd unit makes
-		 * systemctl fail.
-		 * Let's ignore this failure.
-		 *
-		 * Enabling an enabled systemd unit doesn't fail.
-		 */
-		if (enable)
-			return error(_("failed to run systemctl"));
-	return 0;
-}
-
-static int systemd_timer_delete_unit_templates(void)
+static int systemd_timer_delete_timer_file(enum schedule_priority priority)
 {
 	int ret = 0;
-	char *filename = xdg_config_home_systemd("git-maintenance@.timer");
-	if (unlink(filename) && !is_missing_file_error(errno))
-		ret = error_errno(_("failed to delete '%s'"), filename);
-	FREE_AND_NULL(filename);
+	const char *frequency = get_frequency(priority);
+	char *local_timer_name = xstrfmt(SYSTEMD_UNIT_FORMAT, frequency, "timer");
+	char *filename = xdg_config_home_systemd(local_timer_name);
 
-	filename = xdg_config_home_systemd("git-maintenance@.service");
 	if (unlink(filename) && !is_missing_file_error(errno))
 		ret = error_errno(_("failed to delete '%s'"), filename);
 
 	free(filename);
+	free(local_timer_name);
 	return ret;
 }
 
-static int systemd_timer_delete_units(void)
+static int systemd_timer_delete_service_template(void)
 {
-	return systemd_timer_enable_unit(0, SCHEDULE_HOURLY) ||
-	       systemd_timer_enable_unit(0, SCHEDULE_DAILY) ||
-	       systemd_timer_enable_unit(0, SCHEDULE_WEEKLY) ||
-	       systemd_timer_delete_unit_templates();
+	int ret = 0;
+	char *local_service_name = xstrfmt(SYSTEMD_UNIT_FORMAT, "", "service");
+	char *filename = xdg_config_home_systemd(local_service_name);
+	if (unlink(filename) && !is_missing_file_error(errno))
+		ret = error_errno(_("failed to delete '%s'"), filename);
+
+	free(filename);
+	free(local_service_name);
+	return ret;
 }
 
-static int systemd_timer_write_unit_templates(const char *exec_path)
+/*
+ * Write the schedule information into a git-maintenance@<schedule>.timer
+ * file using a custom minute. This timer file cannot use the templating
+ * system, so we generate a specific file for each.
+ */
+static int systemd_timer_write_timer_file(enum schedule_priority schedule,
+					  int minute)
 {
+	int res = -1;
 	char *filename;
 	FILE *file;
 	const char *unit;
+	char *schedule_pattern = NULL;
+	const char *frequency = get_frequency(schedule);
+	char *local_timer_name = xstrfmt(SYSTEMD_UNIT_FORMAT, frequency, "timer");
 
-	filename = xdg_config_home_systemd("git-maintenance@.timer");
+	filename = xdg_config_home_systemd(local_timer_name);
+
 	if (safe_create_leading_directories(filename)) {
 		error(_("failed to create directories for '%s'"), filename);
 		goto error;
@@ -2354,6 +2347,23 @@ static int systemd_timer_write_unit_templates(const char *exec_path)
 	file = fopen_or_warn(filename, "w");
 	if (!file)
 		goto error;
+
+	switch (schedule) {
+	case SCHEDULE_HOURLY:
+		schedule_pattern = xstrfmt("*-*-* 1..23:%02d:00", minute);
+		break;
+
+	case SCHEDULE_DAILY:
+		schedule_pattern = xstrfmt("Tue..Sun *-*-* 0:%02d:00", minute);
+		break;
+
+	case SCHEDULE_WEEKLY:
+		schedule_pattern = xstrfmt("Mon 0:%02d:00", minute);
+		break;
+
+	default:
+		BUG("Unhandled schedule_priority");
+	}
 
 	unit = "# This file was created and is maintained by Git.\n"
 	       "# Any edits made in this file might be replaced in the future\n"
@@ -2363,12 +2373,12 @@ static int systemd_timer_write_unit_templates(const char *exec_path)
 	       "Description=Optimize Git repositories data\n"
 	       "\n"
 	       "[Timer]\n"
-	       "OnCalendar=%i\n"
+	       "OnCalendar=%s\n"
 	       "Persistent=true\n"
 	       "\n"
 	       "[Install]\n"
 	       "WantedBy=timers.target\n";
-	if (fputs(unit, file) == EOF) {
+	if (fprintf(file, unit, schedule_pattern) < 0) {
 		error(_("failed to write to '%s'"), filename);
 		fclose(file);
 		goto error;
@@ -2377,9 +2387,36 @@ static int systemd_timer_write_unit_templates(const char *exec_path)
 		error_errno(_("failed to flush '%s'"), filename);
 		goto error;
 	}
-	free(filename);
 
-	filename = xdg_config_home_systemd("git-maintenance@.service");
+	res = 0;
+
+error:
+	free(schedule_pattern);
+	free(local_timer_name);
+	free(filename);
+	return res;
+}
+
+/*
+ * No matter the schedule, we use the same service and can make use of the
+ * templating system. When installing git-maintenance@<schedule>.timer,
+ * systemd will notice that git-maintenance@.service exists as a template
+ * and will use this file and insert the <schedule> into the template at
+ * the position of "%i".
+ */
+static int systemd_timer_write_service_template(const char *exec_path)
+{
+	int res = -1;
+	char *filename;
+	FILE *file;
+	const char *unit;
+	char *local_service_name = xstrfmt(SYSTEMD_UNIT_FORMAT, "", "service");
+
+	filename = xdg_config_home_systemd(local_service_name);
+	if (safe_create_leading_directories(filename)) {
+		error(_("failed to create directories for '%s'"), filename);
+		goto error;
+	}
 	file = fopen_or_warn(filename, "w");
 	if (!file)
 		goto error;
@@ -2397,7 +2434,7 @@ static int systemd_timer_write_unit_templates(const char *exec_path)
 	       "LockPersonality=yes\n"
 	       "MemoryDenyWriteExecute=yes\n"
 	       "NoNewPrivileges=yes\n"
-	       "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n"
+	       "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_VSOCK\n"
 	       "RestrictNamespaces=yes\n"
 	       "RestrictRealtime=yes\n"
 	       "RestrictSUIDSGID=yes\n"
@@ -2412,29 +2449,114 @@ static int systemd_timer_write_unit_templates(const char *exec_path)
 		error_errno(_("failed to flush '%s'"), filename);
 		goto error;
 	}
-	free(filename);
-	return 0;
+
+	res = 0;
 
 error:
+	free(local_service_name);
 	free(filename);
-	systemd_timer_delete_unit_templates();
-	return -1;
+	return res;
+}
+
+static int systemd_timer_enable_unit(int enable,
+				     enum schedule_priority schedule,
+				     int minute)
+{
+	const char *cmd = "systemctl";
+	struct child_process child = CHILD_PROCESS_INIT;
+	const char *frequency = get_frequency(schedule);
+
+	/*
+	 * Disabling the systemd unit while it is already disabled makes
+	 * systemctl print an error.
+	 * Let's ignore it since it means we already are in the expected state:
+	 * the unit is disabled.
+	 *
+	 * On the other hand, enabling a systemd unit which is already enabled
+	 * produces no error.
+	 */
+	if (!enable)
+		child.no_stderr = 1;
+	else if (systemd_timer_write_timer_file(schedule, minute))
+		return -1;
+
+	get_schedule_cmd(&cmd, NULL);
+	strvec_split(&child.args, cmd);
+	strvec_pushl(&child.args, "--user", enable ? "enable" : "disable",
+		     "--now", NULL);
+	strvec_pushf(&child.args, SYSTEMD_UNIT_FORMAT, frequency, "timer");
+
+	if (start_command(&child))
+		return error(_("failed to start systemctl"));
+	if (finish_command(&child))
+		/*
+		 * Disabling an already disabled systemd unit makes
+		 * systemctl fail.
+		 * Let's ignore this failure.
+		 *
+		 * Enabling an enabled systemd unit doesn't fail.
+		 */
+		if (enable)
+			return error(_("failed to run systemctl"));
+	return 0;
+}
+
+/*
+ * A previous version of Git wrote the timer units as template files.
+ * Clean these up, if they exist.
+ */
+static void systemd_timer_delete_stale_timer_templates(void)
+{
+	char *timer_template_name = xstrfmt(SYSTEMD_UNIT_FORMAT, "", "timer");
+	char *filename = xdg_config_home_systemd(timer_template_name);
+
+	if (unlink(filename) && !is_missing_file_error(errno))
+		warning(_("failed to delete '%s'"), filename);
+
+	free(filename);
+	free(timer_template_name);
+}
+
+static int systemd_timer_delete_unit_files(void)
+{
+	systemd_timer_delete_stale_timer_templates();
+
+	/* Purposefully not short-circuited to make sure all are called. */
+	return systemd_timer_delete_timer_file(SCHEDULE_HOURLY) |
+	       systemd_timer_delete_timer_file(SCHEDULE_DAILY) |
+	       systemd_timer_delete_timer_file(SCHEDULE_WEEKLY) |
+	       systemd_timer_delete_service_template();
+}
+
+static int systemd_timer_delete_units(void)
+{
+	int minute = get_random_minute();
+	/* Purposefully not short-circuited to make sure all are called. */
+	return systemd_timer_enable_unit(0, SCHEDULE_HOURLY, minute) |
+	       systemd_timer_enable_unit(0, SCHEDULE_DAILY, minute) |
+	       systemd_timer_enable_unit(0, SCHEDULE_WEEKLY, minute) |
+	       systemd_timer_delete_unit_files();
 }
 
 static int systemd_timer_setup_units(void)
 {
+	int minute = get_random_minute();
 	const char *exec_path = git_exec_path();
 
-	int ret = systemd_timer_write_unit_templates(exec_path) ||
-		  systemd_timer_enable_unit(1, SCHEDULE_HOURLY) ||
-		  systemd_timer_enable_unit(1, SCHEDULE_DAILY) ||
-		  systemd_timer_enable_unit(1, SCHEDULE_WEEKLY);
+	int ret = systemd_timer_write_service_template(exec_path) ||
+		  systemd_timer_enable_unit(1, SCHEDULE_HOURLY, minute) ||
+		  systemd_timer_enable_unit(1, SCHEDULE_DAILY, minute) ||
+		  systemd_timer_enable_unit(1, SCHEDULE_WEEKLY, minute);
+
 	if (ret)
 		systemd_timer_delete_units();
+	else
+		systemd_timer_delete_stale_timer_templates();
+
 	return ret;
 }
 
-static int systemd_timer_update_schedule(int run_maintenance, int fd)
+static int systemd_timer_update_schedule(int run_maintenance, int fd UNUSED)
 {
 	if (run_maintenance)
 		return systemd_timer_setup_units();
@@ -2606,9 +2728,12 @@ static int maintenance_start(int argc, const char **argv, const char *prefix)
 	opts.scheduler = resolve_scheduler(opts.scheduler);
 	validate_scheduler(opts.scheduler);
 
+	if (update_background_schedule(&opts, 1))
+		die(_("failed to set up maintenance schedule"));
+
 	if (maintenance_register(ARRAY_SIZE(register_args)-1, register_args, NULL))
 		warning(_("failed to add repo to global config"));
-	return update_background_schedule(&opts, 1);
+	return 0;
 }
 
 static const char *const builtin_maintenance_stop_usage[] = {
