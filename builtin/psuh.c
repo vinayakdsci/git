@@ -29,11 +29,7 @@ int cmd_psuh(int argc, const char **argv, const char *prefix) {
 	printf(_("You are on branch %s\n"), status.branch);
 
 	// initialise a commit struct
-<<<<<<< HEAD
 	struct commit *c = NULL;
-=======
-	struct commit *c = NULL; // array of commits
->>>>>>> refs/remotes/origin/my-first-contrib
 	// initialise a string buffer
 	struct strbuf commitline = STRBUF_INIT;
 	// populate the commits array
@@ -44,12 +40,8 @@ int cmd_psuh(int argc, const char **argv, const char *prefix) {
 		printf(_("Current commit: %s\n"), commitline.buf);
 	}
 
-<<<<<<< HEAD
 	strbuf_release(&commitline);
 	free(status.branch);
-	free((char*) cfg_user_name);
-=======
 
->>>>>>> refs/remotes/origin/my-first-contrib
 	return 0;
 }
