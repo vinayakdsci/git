@@ -230,6 +230,16 @@ test_expect_success 'push with negotiation proceeds anyway even if negotiation f
 	test_grep "push negotiation failed" err
 '
 
+test_expect_success 'push deletion with negotiation' '
+	mk_empty testrepo &&
+	git push testrepo $the_first_commit:refs/heads/master &&
+	git -c push.negotiate=1 push testrepo \
+		:master $the_first_commit:refs/heads/next 2>errors-2 &&
+	test_grep ! "negotiate-only needs one or " errors-2 &&
+	git -c push.negotiate=1 push testrepo :next 2>errors-1 &&
+	test_grep ! "negotiate-only needs one or " errors-1
+'
+
 test_expect_success 'push with negotiation does not attempt to fetch submodules' '
 	mk_empty submodule_upstream &&
 	test_commit -C submodule_upstream submodule_commit &&
@@ -965,7 +975,7 @@ test_expect_success 'allow push to HEAD of non-bare repository (config)' '
 	! grep "warning: updating the current branch" stderr
 '
 
-test_expect_success 'fetch with branches' '
+test_expect_success WITHOUT_BREAKING_CHANGES 'fetch with branches' '
 	mk_empty testrepo &&
 	git branch second $the_first_commit &&
 	git checkout second &&
@@ -981,7 +991,7 @@ test_expect_success 'fetch with branches' '
 	git checkout main
 '
 
-test_expect_success 'fetch with branches containing #' '
+test_expect_success WITHOUT_BREAKING_CHANGES 'fetch with branches containing #' '
 	mk_empty testrepo &&
 	mkdir testrepo/.git/branches &&
 	echo "..#second" > testrepo/.git/branches/branch2 &&
@@ -995,7 +1005,7 @@ test_expect_success 'fetch with branches containing #' '
 	git checkout main
 '
 
-test_expect_success 'push with branches' '
+test_expect_success WITHOUT_BREAKING_CHANGES 'push with branches' '
 	mk_empty testrepo &&
 	git checkout second &&
 
@@ -1012,7 +1022,7 @@ test_expect_success 'push with branches' '
 	)
 '
 
-test_expect_success 'push with branches containing #' '
+test_expect_success WITHOUT_BREAKING_CHANGES 'push with branches containing #' '
 	mk_empty testrepo &&
 
 	test_when_finished "rm -rf .git/branches" &&
@@ -1201,18 +1211,16 @@ test_expect_success 'push --porcelain --dry-run rejected' '
 '
 
 test_expect_success 'push --prune' '
-	mk_test testrepo heads/main heads/second heads/foo heads/bar &&
+	mk_test testrepo heads/main heads/foo heads/bar &&
 	git push --prune testrepo : &&
 	check_push_result testrepo $the_commit heads/main &&
-	check_push_result testrepo $the_first_commit heads/second &&
 	! check_push_result testrepo $the_first_commit heads/foo heads/bar
 '
 
 test_expect_success 'push --prune refspec' '
-	mk_test testrepo tmp/main tmp/second tmp/foo tmp/bar &&
+	mk_test testrepo tmp/main tmp/foo tmp/bar &&
 	git push --prune testrepo "refs/heads/*:refs/tmp/*" &&
 	check_push_result testrepo $the_commit tmp/main &&
-	check_push_result testrepo $the_first_commit tmp/second &&
 	! check_push_result testrepo $the_first_commit tmp/foo tmp/bar
 '
 
@@ -1384,7 +1392,8 @@ test_expect_success 'fetch follows tags by default' '
 		git tag -m "annotated" tag &&
 		git for-each-ref >tmp1 &&
 		sed -n "p; s|refs/heads/main$|refs/remotes/origin/main|p" tmp1 |
-		sort -k 3 >../expect
+		sed -n "p; s|refs/heads/main$|refs/remotes/origin/HEAD|p"  |
+		sort -k 4 >../expect
 	) &&
 	test_when_finished "rm -rf dst" &&
 	git init dst &&

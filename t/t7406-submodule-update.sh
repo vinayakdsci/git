@@ -1093,7 +1093,9 @@ test_expect_success 'submodule update --quiet passes quietness to fetch with a s
 	) &&
 	git clone super4 super5 &&
 	(cd super5 &&
-	 git submodule update --quiet --init --depth=1 submodule3 >out 2>err &&
+	 # This test var can mess with the stderr output checked in this test.
+	 GIT_TEST_NAME_HASH_VERSION=1 \
+		git submodule update --quiet --init --depth=1 submodule3 >out 2>err &&
 	 test_must_be_empty out &&
 	 test_must_be_empty err
 	) &&
@@ -1200,6 +1202,54 @@ test_expect_success 'commit with staged submodule change with ignoreSubmodules d
 test_expect_success 'commit with staged submodule change with ignoreSubmodules all' '
 	test_config diff.ignoreSubmodules all &&
 	add_submodule_commit_and_validate
+'
+
+test_expect_success CASE_INSENSITIVE_FS,SYMLINKS \
+	'submodule paths must not follow symlinks' '
+
+	# This is only needed because we want to run this in a self-contained
+	# test without having to spin up an HTTP server; However, it would not
+	# be needed in a real-world scenario where the submodule is simply
+	# hosted on a public site.
+	test_config_global protocol.file.allow always &&
+
+	# Make sure that Git tries to use symlinks on Windows
+	test_config_global core.symlinks true &&
+
+	tell_tale_path="$PWD/tell.tale" &&
+	git init hook &&
+	(
+		cd hook &&
+		mkdir -p y/hooks &&
+		write_script y/hooks/post-checkout <<-EOF &&
+		echo HOOK-RUN >&2
+		echo hook-run >"$tell_tale_path"
+		EOF
+		git add y/hooks/post-checkout &&
+		test_tick &&
+		git commit -m post-checkout
+	) &&
+
+	hook_repo_path="$(pwd)/hook" &&
+	git init captain &&
+	(
+		cd captain &&
+		git submodule add --name x/y "$hook_repo_path" A/modules/x &&
+		test_tick &&
+		git commit -m add-submodule &&
+
+		printf .git >dotgit.txt &&
+		git hash-object -w --stdin <dotgit.txt >dot-git.hash &&
+		printf "120000 %s 0\ta\n" "$(cat dot-git.hash)" >index.info &&
+		git update-index --index-info <index.info &&
+		test_tick &&
+		git commit -m add-symlink
+	) &&
+
+	test_path_is_missing "$tell_tale_path" &&
+	git clone --recursive captain hooked 2>err &&
+	test_grep ! HOOK-RUN err &&
+	test_path_is_missing "$tell_tale_path"
 '
 
 test_done

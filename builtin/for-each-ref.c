@@ -1,3 +1,4 @@
+#define USE_THE_REPOSITORY_VARIABLE
 #include "builtin.h"
 #include "commit.h"
 #include "config.h"
@@ -16,14 +17,17 @@ static char const * const for_each_ref_usage[] = {
 	NULL
 };
 
-int cmd_for_each_ref(int argc, const char **argv, const char *prefix)
+int cmd_for_each_ref(int argc,
+		     const char **argv,
+		     const char *prefix,
+		     struct repository *repo UNUSED)
 {
 	struct ref_sorting *sorting;
 	struct string_list sorting_options = STRING_LIST_INIT_DUP;
-	int icase = 0;
+	int icase = 0, include_root_refs = 0, from_stdin = 0;
 	struct ref_filter filter = REF_FILTER_INIT;
 	struct ref_format format = REF_FORMAT_INIT;
-	int from_stdin = 0;
+	unsigned int flags = FILTER_REFS_REGULAR;
 	struct strvec vec = STRVEC_INIT;
 
 	struct option opts[] = {
@@ -53,6 +57,7 @@ int cmd_for_each_ref(int argc, const char **argv, const char *prefix)
 		OPT_NO_CONTAINS(&filter.no_commit, N_("print only refs which don't contain the commit")),
 		OPT_BOOL(0, "ignore-case", &icase, N_("sorting and filtering are case insensitive")),
 		OPT_BOOL(0, "stdin", &from_stdin, N_("read reference patterns from stdin")),
+		OPT_BOOL(0, "include-root-refs", &include_root_refs, N_("also include HEAD ref and pseudorefs")),
 		OPT_END(),
 	};
 
@@ -96,8 +101,11 @@ int cmd_for_each_ref(int argc, const char **argv, const char *prefix)
 		filter.name_patterns = argv;
 	}
 
+	if (include_root_refs)
+		flags |= FILTER_REFS_ROOT_REFS | FILTER_REFS_DETACHED_HEAD;
+
 	filter.match_as_path = 1;
-	filter_and_format_refs(&filter, FILTER_REFS_ALL, sorting, &format);
+	filter_and_format_refs(&filter, flags, sorting, &format);
 
 	ref_filter_clear(&filter);
 	ref_sorting_release(sorting);
